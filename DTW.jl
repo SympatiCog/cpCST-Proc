@@ -7,8 +7,6 @@ using InteractiveUtils
 # ╔═╡ bdb713b2-e0aa-11ef-0495-1773f74653d8
 begin
     using Pkg
-    Pkg.add("ArgParse")
-    Pkg.add("SentinelArrays")
     Pkg.activate(".")
     using CSV
     using DataFrames
@@ -16,7 +14,7 @@ begin
     using Distances
     using Glob
     using Smoothers
-    using Query
+
     using SentinelArrays
     using Statistics
     using ArgParse
@@ -25,6 +23,8 @@ end
 
 # ╔═╡ c57f51d1-6133-460c-8ad4-31d8ac0d8349
 begin
+    const SAMPLING_RATE = 60  # Hz — sampling rate for timestamp conversion
+
     function ffill!(vec)
         for k in 1:length(vec)
             if isnan(vec[k]) && k > 1
@@ -42,34 +42,26 @@ begin
         return fr
     end
 
-    function get_row(dat, tgt_val)
-        tmp = @from i in dat begin
-            @where i.user == tgt_val
-            @select {i.user, i.stim}
-            @collect DataFrame
-        end
-        tmp[!, :user_ts] = tmp.user .* (1/60)
-        tmp[!, :stim_ts] = tmp.stim .* (1/60)
-        return tmp
-    end
-
-    function get_point_rt(dat)
-        idx = dat.user[1]
-        user_ts = dat.user_ts[1]
-        mean_stim = mean(dat.stim_ts)
-        inst_rt = mean_stim - user_ts
-        return inst_rt
-    end
-
     function compute_irt!(DF, radius)
         dat = get_dtw_vals(DF, radius)
         n_vals = length(DF.user_pos)
         user_irt = zeros(n_vals)
+        grouped = Dict{Int, DataFrame}()
+        for row in eachrow(dat)
+            u = row.user
+            if !haskey(grouped, u)
+                grouped[u] = DataFrame(user=Int[], stim=Int[])
+            end
+            push!(grouped[u], (user=row.user, stim=row.stim))
+        end
 
         for u in 1:n_vals
-            rdat = get_row(dat, u)
-            irt = get_point_rt(rdat)
-            user_irt[u] = irt
+            if haskey(grouped, u)
+                rdat = grouped[u]
+                rdat[!, :user_ts] = rdat.user .* (1/SAMPLING_RATE)
+                rdat[!, :stim_ts] = rdat.stim .* (1/SAMPLING_RATE)
+                user_irt[u] = mean(rdat.stim_ts) - rdat.user_ts[1]
+            end
         end
 
         DF[!, :irt] = user_irt

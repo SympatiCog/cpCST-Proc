@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 import traceback
 
 def restructure_arr(arr):
-        diff = np.diff(arr)
-        differences = [np.median(diff) if val == 0 else val for val in diff]
-        return np.concatenate(([arr[0]], arr[0] + np.cumsum(differences)))
+    diff = np.diff(arr)
+    differences = [np.median(diff) if val == 0 else val for val in diff]
+    return np.concatenate(([arr[0]], arr[0] + np.cumsum(differences)))
 
 class CrashRepair:
     def __init__(self, data_df, sampling_rate=30, target_max_position=0.4, window_size=3.0):
@@ -25,17 +25,15 @@ class CrashRepair:
         self.frame_duration = 1 / sampling_rate
         self.target_max_position = target_max_position
         self.window_frame_count = int(window_size * sampling_rate)
+        self._segments = None
         
     def set_target_max_position(self):
         """
-        Set the target maximum position based on the 99th percentile of 
+        Set the target maximum position based on the 99th percentile of
         the absolute stimulus positions. This overwrites the target_max_position
         set in the constructor.
         """
-        abs_stim = np.abs(self.data['stim_pos'].values).copy()
-        s = np.sort(abs_stim)
-        tgt = int(len(s) * 0.99)
-        self.target_max_position = s[tgt]
+        self.target_max_position = np.percentile(np.abs(self.data['stim_pos'].values), 99)
 
     def smooth_dampen(self, values, target_max, scale_factor=1.5):
         """
@@ -46,34 +44,34 @@ class CrashRepair:
         :param scale_factor: Factor to control the damping.
         :return: Dampened values.
         """
+        if target_max == 0:
+            return values
         normalized = np.abs(values) / target_max
         dampened = np.tanh(normalized / scale_factor) * target_max
         return np.sign(values) * dampened
     
-    def compute_weighted_velocity(self, positions, times, window=5):
-        """
-        Compute the weighted velocity over a specified window.
-        
-        :param positions: Array of position values.
-        :param times: Array of time values.
-        :param window: Number of frames to consider for velocity calculation.
-        :return: Weighted average velocity.
-        """
-        if len(positions) < window:
-            return 0
-        velocities = np.diff(positions[-window:]) / np.diff(times[-window:])
-        weights = np.linspace(0.5, 1.0, len(velocities))
-        return np.average(velocities, weights=weights)
-    
+    def _fit_pchip(self, times, values):
+        try:
+            return PchipInterpolator(times, values)
+        except Exception:
+            try:
+                return PchipInterpolator(restructure_arr(times), values)
+            except Exception:
+                traceback.print_exc()
+                return None
+
     def find_crash_segments(self):
         """
         Identify segments in the data where crashes occur.
         
         :return: List of dictionaries containing crash segment information.
         """
+        if self._segments is not None:
+            return self._segments
+
         crash_transitions = self.data[self.data['crash_count'].diff() != 0].index.tolist()
         segments = []
-        
+
         for crash_idx in crash_transitions:
             # Adjust window sizes based on available data
             pre_window = min(self.window_frame_count, crash_idx)
@@ -97,66 +95,42 @@ class CrashRepair:
                 'is_partial': pre_window < self.window_frame_count or post_window < self.window_frame_count
             })
         
-        return segments
+        self._segments = segments
+        return self._segments
 
     def compute_transition(self, pre_data, post_data):
         if len(pre_data) < 2 or len(post_data) < 2:
             return None
-            
-        time_gap = post_data['flip_time'].iloc[0] - pre_data['flip_time'].iloc[-1]
+
         n_frames = len(pre_data) + len(post_data)
-        
-        # Define the time range for interpolation
         times = np.linspace(
             pre_data['flip_time'].iloc[0],
             post_data['flip_time'].iloc[-1],
             n_frames
         )
-        
-        # Fit a piecewise polynomial (PCHIP) to ensure smooth transitions
-        pre_times = pre_data['flip_time'].values
-        post_times = post_data['flip_time'].values
 
-        try:
-            stim_pchip = PchipInterpolator(
-                np.concatenate([pre_times, post_times]),
-                np.concatenate([pre_data['stim_pos'].values, post_data['stim_pos'].values])
-            )
-        except Exception as e1:
-            try:
-                stim_pchip = PchipInterpolator(
-                restructure_arr(np.concatenate([pre_times, post_times])),
-                np.concatenate([pre_data['stim_pos'].values, post_data['stim_pos'].values])
-            )
-            except Exception as e2:
-                traceback.print_exc()
+        all_times = np.concatenate([pre_data['flip_time'].values, post_data['flip_time'].values])
+        stim_vals = np.concatenate([pre_data['stim_pos'].values, post_data['stim_pos'].values])
+        user_vals = np.concatenate([pre_data['user_pos'].values, post_data['user_pos'].values])
 
-        try:
-            user_pchip = PchipInterpolator(
-            np.concatenate([pre_times, post_times]),
-            np.concatenate([pre_data['user_pos'].values, post_data['user_pos'].values])
-        )
-        except Exception as e1:
-            try:
-                user_pchip = PchipInterpolator(
-                restructure_arr(np.concatenate([pre_times, post_times])),
-                np.concatenate([pre_data['user_pos'].values, post_data['user_pos'].values])
-            )
-            except Exception as e2:
-                traceback.print_exc()
+        stim_pchip = self._fit_pchip(all_times, stim_vals)
+        if stim_pchip is None:
+            return None
+        user_pchip = self._fit_pchip(all_times, user_vals)
+        if user_pchip is None:
+            return None
 
-        # Interpolate the data
         interp_stim = stim_pchip(times)
         interp_user = user_pchip(times)
 
-        # Scale the interpolated values to ensure they do not exceed the target max position
         interp_stim = self.smooth_dampen(interp_stim, self.target_max_position)
         interp_user = self.smooth_dampen(interp_user, self.target_max_position)
-        # Optionally apply a smoothing filter
+
         window_length = min(15, len(interp_stim) // 2 * 2 - 1)
-        if window_length > 3:
+        if window_length >= 5:
             interp_stim = savgol_filter(interp_stim, window_length, 3)
             interp_user = savgol_filter(interp_user, window_length, 3)
+
         return pd.DataFrame({
             'stim_pos': interp_stim,
             'user_pos': interp_user,
@@ -233,26 +207,25 @@ class CrashRepair:
         start_idx = crash_idx - window_size
         end_idx = crash_idx + window_size
 
-        # Check if the calculated indices are within bounds
         if start_idx < 0:
             print(f"Warning: Calculated start index {start_idx} is out of bounds.")
-            return
+            return None
         if end_idx >= len(self.data):
             print(f"Warning: Calculated end index {end_idx} is out of bounds.")
-            return
+            return None
+
+        half_window = window_size // 2
+        span_start = self.data.loc[crash_idx - half_window, 'flip_time']
+        span_end = self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration']
 
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12))
-        ax1.plot(self.data.loc[start_idx:end_idx, 'flip_time'], 
+        ax1.plot(self.data.loc[start_idx:end_idx, 'flip_time'],
                 self.data.loc[start_idx:end_idx, 'stim_pos'],
                 'r--', label='Original Stimulus')
         ax1.plot(repaired_data.loc[start_idx:end_idx, 'flip_time'],
                 repaired_data.loc[start_idx:end_idx, 'stim_pos'],
                 'b-', label='Repaired Stimulus')
-        ax1.axvspan(
-            self.data.loc[crash_idx-(window_size/2), 'flip_time'],
-            self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
-            color='gray', alpha=0.2, label='Reset Period'
-        )
+        ax1.axvspan(span_start, span_end, color='gray', alpha=0.2, label='Reset Period')
         ax1.axhline(y=self.target_max_position, color='g', linestyle=':')
         ax1.axhline(y=-self.target_max_position, color='g', linestyle=':')
         ax1.set_ylabel('Stimulus Position')
@@ -264,27 +237,29 @@ class CrashRepair:
         ax2.plot(repaired_data.loc[start_idx:end_idx, 'flip_time'],
                 repaired_data.loc[start_idx:end_idx, 'user_pos'],
                 'b-', label='Repaired User')
-        ax2.axvspan(
-            self.data.loc[crash_idx-(window_size/2), 'flip_time'],
-            self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
-            color='gray', alpha=0.2
-        )
+        ax2.axvspan(span_start, span_end, color='gray', alpha=0.2)
         ax2.axhline(y=self.target_max_position, color='g', linestyle=':')
         ax2.axhline(y=-self.target_max_position, color='g', linestyle=':')
         ax2.set_ylabel('User Position')
         ax2.legend()
 
-        stim_vel = repaired_data.loc[start_idx:end_idx, 'stim_pos'].diff() / \
-                  repaired_data.loc[start_idx:end_idx, 'flip_time'].diff()
-        user_vel = repaired_data.loc[start_idx:end_idx, 'user_pos'].diff() / \
-                  repaired_data.loc[start_idx:end_idx, 'flip_time'].diff()
-
-        ax3.plot(self.data['flip_time'], self.data['stim_pos'], 'r--', label='Original Stimulus')
-        ax3.plot(self.data['flip_time'], self.data['user_pos'], 'b--', label='Original User')
-        ax3.plot(repaired_data['flip_time'], repaired_data['stim_pos'], 'm-', label='Repaired Stimulus')
-        ax3.plot(repaired_data['flip_time'], repaired_data['user_pos'], 'g-', label='Repaired User')
+        # Wider context view around the crash region
+        wide_start = max(0, crash_idx - 2 * window_size)
+        wide_end = min(len(self.data) - 1, crash_idx + 2 * window_size)
+        ax3.plot(self.data.loc[wide_start:wide_end, 'flip_time'],
+                self.data.loc[wide_start:wide_end, 'stim_pos'],
+                'r--', label='Original Stimulus')
+        ax3.plot(self.data.loc[wide_start:wide_end, 'flip_time'],
+                self.data.loc[wide_start:wide_end, 'user_pos'],
+                'b--', label='Original User')
+        ax3.plot(repaired_data.loc[wide_start:wide_end, 'flip_time'],
+                repaired_data.loc[wide_start:wide_end, 'stim_pos'],
+                'm-', label='Repaired Stimulus')
+        ax3.plot(repaired_data.loc[wide_start:wide_end, 'flip_time'],
+                repaired_data.loc[wide_start:wide_end, 'user_pos'],
+                'g-', label='Repaired User')
         ax3.axvspan(
-            self.data.loc[crash_idx-window_size, 'flip_time'],
+            self.data.loc[crash_idx - window_size, 'flip_time'],
             self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
             color='gray', alpha=0.2
         )
