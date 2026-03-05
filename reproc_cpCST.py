@@ -1,20 +1,22 @@
 import pandas as pd
 import numpy as np
-from glob import glob
 from scipy.signal import detrend
 import argparse
 import traceback
 from pathlib import Path
+from multiprocessing import Pool
+from functools import partial
 from CrashRepair import CrashRepair
 import matplotlib.pyplot as plt
 
 def zscale(series):
-    return (series - series.mean()) / series.std()
+    std = series.std()
+    if std == 0:
+        return series - series.mean()
+    return (series - series.mean()) / std
 
-def get_ursi(filpath:str):
-    fname = filpath.split('/')[-1]
-    ursi = fname.split('_')[0].split('-')[-1]
-    return(ursi)
+def get_ursi(file_path: Path):
+    return file_path.stem.split('_')[0].split('-')[-1]
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -26,29 +28,19 @@ def parse_arguments():
 
 def compute_velocity(df, target_col):
     dt = df['flip_time'].diff()
-    df[f"{target_col}_vel"] = (df[target_col].diff() / dt).fillna(0)
-
-# def resample_data(data, target_frequency=30):
-#     new_time_index = np.arange(data['flip_time'].iloc[0], data['flip_time'].iloc[-1], 1.0 / target_frequency)
-#     resampled_data = pd.DataFrame({
-#         'flip_time': new_time_index,
-#         'stim_pos': np.interp(new_time_index, data['flip_time'], data['stim_pos']),
-#         'user_pos': np.interp(new_time_index, data['flip_time'], data['user_pos'])
-#     })
-#     return resampled_data
+    vel = (df[target_col].diff() / dt).fillna(0)
+    vel.replace([np.inf, -np.inf], 0, inplace=True)
+    df[f"{target_col}_vel"] = vel
 
 def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
     try:
         df = pd.read_csv(file_path)
-        ursi = get_ursi(str(file_path))
+        ursi = get_ursi(file_path)
         crash_count = df.crash_count.max()
-        with open("crash_count.csv",'a') as f:
-            f.write(f"{ursi},{crash_count}\n")
 
         df.user_pos = df.user_pos * -1
         cr = CrashRepair(df)
-        cr.set_target_max_position() # Set the reset value for crash repair based 
-                                    # on the user's data distribution.
+        cr.set_target_max_position()
         repaired_df = cr.repair_tracking()
         if df.crash_count.max() > 0:
             fig = cr.plot_repair(repaired_df, segment_index=0)
@@ -66,33 +58,26 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         for col in ["user_pos", "stim_pos", "tracking"]:
             compute_velocity(df, col)
 
-        if detrend_vectors:
-            for col in df.columns:
-                if col != "flip_time":
+        for col in df.columns:
+            if col != "flip_time":
+                if detrend_vectors:
                     df[col] = detrend(df[col])
-
-        if zscale_vectors:
-            for col in df.columns:
-                if col != "flip_time":
+                if zscale_vectors:
                     df[col] = zscale(df[col])
 
-        # df = resample_data(df)
-        
-        # Annotate filename with tags
         filename = file_path.name.replace(".csv", "")
         if detrend_vectors:
             filename += "_detrend"
         if zscale_vectors:
             filename += "_zscale"
         filename += ".csv"
-        
+
         df.user_pos = df.user_pos * -1
         df.to_csv(output_path / filename, index=False)
+        return ursi, crash_count, None
     except Exception as e:
-        print(f"err:{file_path}: {e}")
         traceback.print_exc()
-        with open("errs.log", 'a') as f:
-            f.write(f"{file_path}\n")
+        return None, None, str(file_path)
 
 def main():
     args = parse_arguments()
@@ -100,9 +85,21 @@ def main():
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    for file_path in base_path.glob("*.csv"):
-        print(file_path)
-        process_file(file_path, output_path, args.detrend_vectors, args.zscale_vectors)
+    files = list(base_path.glob("*.csv"))
+    print(f"Processing {len(files)} files...")
+    worker = partial(process_file, output_path=output_path,
+                     detrend_vectors=args.detrend_vectors,
+                     zscale_vectors=args.zscale_vectors)
+    with Pool() as pool:
+        results = pool.map(worker, files)
+
+    with open(output_path / "crash_count.csv", 'w') as cc, \
+         open(output_path / "errs.log", 'w') as err:
+        for ursi, crash_count, error_path in results:
+            if error_path:
+                err.write(f"{error_path}\n")
+            else:
+                cc.write(f"{ursi},{crash_count}\n")
 
 if __name__ == "__main__":
     main()
