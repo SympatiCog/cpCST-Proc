@@ -8,7 +8,7 @@ using DynamicAxisWarping
 using Distances
 using Glob
 using Smoothers
-using Query
+
 using SentinelArrays
 using Statistics
 using ArgParse
@@ -48,46 +48,30 @@ function get_dtw_vals(DF, thresh=1e-12, radius=120)
 	return dat
 end
 
-# Function to get a specific row based on target value
-function get_row(dat, tgt_val)
-	tmp = @from i in dat begin
-		@where i.user == tgt_val
-		@select {i.user, i.stim}
-		@collect DataFrame
-	end
-	tmp[!, :user_ts] = tmp.user .* (1/SAMPLING_RATE)
-	tmp[!, :stim_ts] = tmp.stim .* (1/SAMPLING_RATE)
-	return tmp
-end
-
-# Function to compute pointwise reaction time
-function get_point_rt(dat)
-	idx = dat.user[1]
-	user_ts = dat.user_ts[1]
-	mean_stim = mean(dat.stim_ts)
-	inst_rt = mean_stim - user_ts
-	return inst_rt
-end
-
 # Function to compute inter-response time and update DataFrame
 function compute_irt!(DF)
 	dat = get_dtw_vals(DF)
 	n_vals = length(DF.user_pos)
 	user_irt = zeros(n_vals)
-	# dtw_stim = zeros(n_vals)  # New array for DTW-shifted stimulus positions
-	# dtw_user = zeros(n_vals)  # New array for DTW-shifted stimulus positions
-	
-	for u in 1:n_vals
-		rdat = get_row(dat, u)
-		irt = get_point_rt(rdat)
-		user_irt[u] = irt
-		# dtw_stim[u] = mean(rdat.stim_ts) * 60  # Convert back to position units
-		# dtw_user[u] = mean(rdat.user_ts) * 60  # Convert back to position units
+	grouped = Dict{Int, DataFrame}()
+	for row in eachrow(dat)
+		u = row.user
+		if !haskey(grouped, u)
+			grouped[u] = DataFrame(user=Int[], stim=Int[])
+		end
+		push!(grouped[u], (user=row.user, stim=row.stim))
 	end
-	
+
+	for u in 1:n_vals
+		if haskey(grouped, u)
+			rdat = grouped[u]
+			rdat[!, :user_ts] = rdat.user .* (1/SAMPLING_RATE)
+			rdat[!, :stim_ts] = rdat.stim .* (1/SAMPLING_RATE)
+			user_irt[u] = mean(rdat.stim_ts) - rdat.user_ts[1]
+		end
+	end
+
 	DF[!, :irt] = user_irt
-	# DF[!, :dtw_stim] = dat.stim  # Add new column for DTW-shifted stimulus positions
-	# DF[!, :dtw_user] = dat.user  # Add new column for DTW-shifted stimulus positions
 end
 
 # Main script execution
