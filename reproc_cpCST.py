@@ -3,6 +3,7 @@ import numpy as np
 from glob import glob
 from scipy.signal import detrend
 import argparse
+import traceback
 from pathlib import Path
 from CrashRepair import CrashRepair
 import matplotlib.pyplot as plt
@@ -87,8 +88,9 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         
         df.user_pos = df.user_pos * -1
         df.to_csv(output_path / filename, index=False)
-    except:
-        print(f"err:{file_path}")
+    except Exception as e:
+        print(f"err:{file_path}: {e}")
+        traceback.print_exc()
         with open("errs.log", 'a') as f:
             f.write(f"{file_path}\n")
 
