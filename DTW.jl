@@ -25,6 +25,8 @@ end
 
 # ╔═╡ c57f51d1-6133-460c-8ad4-31d8ac0d8349
 begin
+    const SAMPLING_RATE = 60  # Hz — sampling rate for timestamp conversion
+
     function ffill!(vec)
         for k in 1:length(vec)
             if isnan(vec[k]) && k > 1
@@ -48,8 +50,8 @@ begin
             @select {i.user, i.stim}
             @collect DataFrame
         end
-        tmp[!, :user_ts] = tmp.user .* (1/60)
-        tmp[!, :stim_ts] = tmp.stim .* (1/60)
+        tmp[!, :user_ts] = tmp.user .* (1/SAMPLING_RATE)
+        tmp[!, :stim_ts] = tmp.stim .* (1/SAMPLING_RATE)
         return tmp
     end
 

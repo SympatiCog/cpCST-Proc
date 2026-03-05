@@ -15,6 +15,9 @@ using SentinelArrays
 using Statistics
 using ArgParse
 using Base.Threads
+
+const SAMPLING_RATE = 60  # Hz — sampling rate for timestamp conversion
+
 # Activate CairoMakie
 # CairoMakie.activate!()
 
@@ -54,8 +57,8 @@ function get_row(dat, tgt_val)
 		@select {i.user, i.stim}
 		@collect DataFrame
 	end
-	tmp[!, :user_ts] = tmp.user .* (1/60)
-	tmp[!, :stim_ts] = tmp.stim .* (1/60)
+	tmp[!, :user_ts] = tmp.user .* (1/SAMPLING_RATE)
+	tmp[!, :stim_ts] = tmp.stim .* (1/SAMPLING_RATE)
 	return tmp
 end
 
