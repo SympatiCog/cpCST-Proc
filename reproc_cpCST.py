@@ -24,7 +24,8 @@ def parse_arguments():
     return parser.parse_args()
 
 def compute_velocity(df, target_col):
-    df[f"{target_col}_vel"] = df[target_col].diff().fillna(0) * df['flip_time'].diff().fillna(0) * 1000
+    dt = df['flip_time'].diff()
+    df[f"{target_col}_vel"] = (df[target_col].diff() / dt).fillna(0)
 
 # def resample_data(data, target_frequency=30):
 #     new_time_index = np.arange(data['flip_time'].iloc[0], data['flip_time'].iloc[-1], 1.0 / target_frequency)
