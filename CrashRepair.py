@@ -130,6 +130,7 @@ class CrashRepair:
             )
             except Exception as e2:
                 traceback.print_exc()
+                return None
 
         try:
             user_pchip = PchipInterpolator(
@@ -144,6 +145,7 @@ class CrashRepair:
             )
             except Exception as e2:
                 traceback.print_exc()
+                return None
 
         # Interpolate the data
         interp_stim = stim_pchip(times)
@@ -154,7 +156,7 @@ class CrashRepair:
         interp_user = self.smooth_dampen(interp_user, self.target_max_position)
         # Optionally apply a smoothing filter
         window_length = min(15, len(interp_stim) // 2 * 2 - 1)
-        if window_length > 3:
+        if window_length >= 5:
             interp_stim = savgol_filter(interp_stim, window_length, 3)
             interp_user = savgol_filter(interp_user, window_length, 3)
         return pd.DataFrame({
