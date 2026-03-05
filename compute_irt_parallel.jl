@@ -1,7 +1,5 @@
 # Import necessary packages
 using Pkg
-Pkg.add("ArgParse")
-Pkg.add("SentinelArrays")
 Pkg.activate(".")
 using CSV
 using DataFrames

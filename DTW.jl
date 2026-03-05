@@ -7,8 +7,6 @@ using InteractiveUtils
 # ╔═╡ bdb713b2-e0aa-11ef-0495-1773f74653d8
 begin
     using Pkg
-    Pkg.add("ArgParse")
-    Pkg.add("SentinelArrays")
     Pkg.activate(".")
     using CSV
     using DataFrames
