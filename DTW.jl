@@ -5,137 +5,37 @@ using Markdown
 using InteractiveUtils
 
 # ╔═╡ bdb713b2-e0aa-11ef-0495-1773f74653d8
-begin
-    using Pkg
-    Pkg.add("ArgParse")
-    Pkg.add("SentinelArrays")
-    Pkg.activate(".")
-    using CSV
-    using DataFrames
-    using DynamicAxisWarping
-    using Distances
-    using Glob
-    using Smoothers
-    using Query
-    using SentinelArrays
-    using Statistics
-    using ArgParse
-    using Base.Threads
-end
+md"""
+# cpCST instantaneous reaction time
+
+This notebook is now a thin front end over `compute_irt_parallel.jl`. It used
+to carry its own copy of the pipeline, which is how the 30 Hz/60 Hz error came
+to live in two places at once; there is one implementation now.
+
+The adaptive-radius search that used to live here has been removed. It ran the
+whole pipeline at radius 120 and, if the mean iRT fell outside [0, 3], re-ran
+it at 110, 100, ... down to 60 until the mean landed in range. Narrowing the
+Sakoe-Chiba band does not correct an out-of-range estimate, it truncates it, so
+the search always terminated eventually and the radius it stopped at was a
+property of the stopping rule rather than of the participant. It was also
+testing against values that were half their true size, because of the sampling
+rate error. Use the fixed `DTW_RADIUS`, and report it.
+"""
 
 # ╔═╡ c57f51d1-6133-460c-8ad4-31d8ac0d8349
+include(joinpath(@__DIR__, "compute_irt_parallel.jl"))
+
+# ╔═╡ 3f9a1c04-5d21-4b7e-9c88-2a4e6f1b0d77
 begin
-    function ffill!(vec)
-        for k in 1:length(vec)
-            if isnan(vec[k]) && k > 1
-                vec[k] = vec[k-1]
-            end
-        end
-    end
-
-    function load_cpCST_csv(filepath)
-        fr = CSV.read(filepath, DataFrame)
-        ffill!(fr.user_pos)
-        ffill!(fr.stim_pos)
-        fr[!, :user_pos] = fr.user_pos * -1
-        fr[!, :time_secs] = fr.flip_time .- fr.flip_time[1]
-        return fr
-    end
-
-    function get_row(dat, tgt_val)
-        tmp = @from i in dat begin
-            @where i.user == tgt_val
-            @select {i.user, i.stim}
-            @collect DataFrame
-        end
-        tmp[!, :user_ts] = tmp.user .* (1/60)
-        tmp[!, :stim_ts] = tmp.stim .* (1/60)
-        return tmp
-    end
-
-    function get_point_rt(dat)
-        idx = dat.user[1]
-        user_ts = dat.user_ts[1]
-        mean_stim = mean(dat.stim_ts)
-        inst_rt = mean_stim - user_ts
-        return inst_rt
-    end
-
-    function compute_irt!(DF, radius)
-        dat = get_dtw_vals(DF, radius)
-        n_vals = length(DF.user_pos)
-        user_irt = zeros(n_vals)
-
-        for u in 1:n_vals
-            rdat = get_row(dat, u)
-            irt = get_point_rt(rdat)
-            user_irt[u] = irt
-        end
-
-        DF[!, :irt] = user_irt
-    end
-
-    function process_file_thread_A(file, destination_folder)
-        df = load_cpCST_csv(file)
-        radius = 120
-        compute_irt!(df, radius)
-
-        mean_irt = mean(df.irt)
-        println("Processing file: ", file)
-        println("Initial IRT mean: ", mean_irt, " | Radius: ", radius)
-
-        if mean_irt > 3 || mean_irt < 0
-            println("IRT out of range, switching to Thread B")
-            process_file_thread_B(file, destination_folder, 110)
-        else
-            dest_file = joinpath(destination_folder, basename(file))
-            CSV.write(dest_file, df)
-            println("File processed and saved successfully: ", dest_file)
-        end
-    end
-
-    function get_dtw_vals(DF, radius, thresh=1e-12)
-        a = DF.stim_pos
-        b = DF.user_pos
-        dist = SqEuclidean(thresh)
-        cost, i1, i2 = fastdtw(a, b, dist, radius)
-        dat = DataFrame(user=i1, stim=i2)
-        return dat
-    end
-
-    function process_file_thread_B(file, destination_folder, radius, iteration=1)
-        df = load_cpCST_csv(file)
-        compute_irt!(df, radius)
-
-        while (mean(df.irt) > 3 || mean(df.irt) < 0) && iteration <= 6
-            println("Iteration: ", iteration, " | File: ", file, " | Radius: ", radius, " | Mean IRT: ", mean(df.irt))
-            radius -= 10
-            iteration += 1
-            compute_irt!(df, radius)
-        end
-
-        dest_file = joinpath(destination_folder, basename(file))
-        CSV.write(dest_file, df)
-        println("Final processed file saved: ", dest_file, " | Final Radius: ", radius)
-    end
-
-    function process_files(source_folder, destination_folder)
-        csv_files = glob("*.csv", source_folder)
-
-        Threads.@threads for file in csv_files
-            process_file_thread_A(file, destination_folder)
-        end
-    end
+	source_folder = "./proc_cpCST_data"
+	destination_folder = "./irt_data"
 end
 
 # ╔═╡ debc58f9-b213-49cf-baa1-4ee105c572e0
-begin
-    source_folder = "/Users/danielgarcia-barnett/Desktop/Coding/cpCST_data_analysis/IRT_extraction/test_data/feb_1_2025/test_4/proc_cpCST_data"
-    destination_folder = "/Users/danielgarcia-barnett/Desktop/Coding/cpCST_data_analysis/IRT_extraction/test_data/feb_1_2025/test_4/irt_data"
-    process_files(source_folder, destination_folder)
-end
+process_files(source_folder, destination_folder; radius=DTW_RADIUS)
 
 # ╔═╡ Cell order:
-# ╠═bdb713b2-e0aa-11ef-0495-1773f74653d8
+# ╟─bdb713b2-e0aa-11ef-0495-1773f74653d8
 # ╠═c57f51d1-6133-460c-8ad4-31d8ac0d8349
+# ╠═3f9a1c04-5d21-4b7e-9c88-2a4e6f1b0d77
 # ╠═debc58f9-b213-49cf-baa1-4ee105c572e0
