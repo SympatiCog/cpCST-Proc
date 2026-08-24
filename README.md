@@ -18,7 +18,8 @@ julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data
 ```
 
 Add `--detrend_vectors --zscale_vectors` to stage 1 for optional signal processing.
-Add `--radius N` to stage 2 to override the DTW band (default 120 samples = 4.0 s at 30 Hz).
+Add `--radius N` to stage 2 to override the DTW band (default 120 samples, which bounds the warp
+to 4.0 s at 30 Hz).
 
 > **Pass `--threads=auto`.** Julia defaults to a single thread, and without it the parallel loop
 > runs serially. You do *not* need `--project` — the script activates its own environment.
@@ -57,6 +58,11 @@ before writing, but the derived columns are not. So in the output file `user_pos
 derivative of `-user_pos`, and `tracking == -user_pos - stim_pos`. `stim_pos_vel` is unaffected.
 This is long-standing behaviour, left alone deliberately — which convention should win is a
 research decision, not a cleanup.
+
+**Negative iRT means something is wrong.** The user cannot respond before the stimulus, so a
+negative value is a direct read on alignment failure. In the continuous phase 100% of them fall
+within 5 s of a repaired crash region, and no crash-free recording produces any — so a clean
+recording with negative iRT is worth investigating rather than filtering.
 
 **`errs.log` and `crash_count.csv` append.** Clear them between runs if you want an accurate count.
 
