@@ -33,6 +33,13 @@ SIGNAL_COLS = ("user_pos", "stim_pos", "tracking", "covary",
 
 REQUIRED_COLS = {"flip_time", "stim_pos", "user_pos", "crash_count"}
 
+# Minimum usable samples for a recording to be worth processing, at 30 Hz.
+# Aborted sessions do occur: X10961871's entire MOBI1A session is two such
+# files, of 0.000 s and 0.034 s. The corpus is cleanly bimodal -- the next
+# shortest recording is 88.4 s -- so any threshold in that gap is unambiguous.
+# One second is far below anything real and far above anything degenerate.
+MIN_SAMPLES = 30
+
 
 def compute_velocity(df, target_col):
     """First derivative, in position units per second.
@@ -70,10 +77,10 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         # makes velocity undefined and the resulting NaN poisons detrend.
         keep = np.r_[True, np.diff(df.flip_time.values.astype(float)) > 0]
         df = df.loc[keep].reset_index(drop=True)
-        if len(df) < 2:
-            # aborted recordings do exist in this set: one file is two rows
-            # carrying the same timestamp, which is a single usable sample
-            print(f"skip (only {len(df)} usable sample(s)): {file_path}")
+        if len(df) < MIN_SAMPLES:
+            span = (df.flip_time.iloc[-1] - df.flip_time.iloc[0]) if len(df) > 1 else 0.0
+            print(f"skip (aborted recording: {len(df)} usable sample(s), "
+                  f"{span:.3f} s): {file_path}")
             return
         ursi = get_ursi(str(file_path))
         crash_count = df.crash_count.max()
