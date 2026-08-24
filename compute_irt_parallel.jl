@@ -23,15 +23,26 @@ using Statistics
 using ArgParse
 using Base.Threads
 
-# Sakoe-Chiba band half-width, in samples. At 30 Hz, 120 is a 4.0 s warp
-# window -- comfortably past any plausible reaction time.
+# Sakoe-Chiba band half-width, in samples. At 30 Hz, 120 bounds the warp to
+# 4.0 s -- comfortably past any plausible reaction time.
+#
+# The bound is only real because this uses `dtw` with explicit band limits.
+# It was previously `fastdtw`, whose `radius` argument does NOT constrain the
+# warp: FastDTW coarsens the series, aligns at low resolution, projects that
+# path up and refines within `radius` cells OF THE PROJECTED PATH, not of the
+# diagonal. A bad coarse alignment is inherited rather than corrected, so the
+# final path can sit arbitrarily far off-diagonal. Measured on one continuous
+# file at radius 120: offsets of -1584 and +1818 samples (-53 s and +61 s),
+# with 61.6% of the path outside the nominal radius, producing iRT values down
+# to -52.8 s. A genuine band caps the offset at exactly `radius`, removes every
+# whole-file failure in the corpus, leaves well-behaved files unchanged to
+# three decimals, and runs ~3.7x faster than FastDTW at this length.
 #
 # This used to be searched: start at 120 and shrink by 10 until the mean iRT
-# fell inside [0, 3]. That loop was unsound. Narrowing the band does not make a
-# wrong estimate right, it CLIPS the estimate, so the search always eventually
-# "succeeded" and the value it stopped on was an artefact of the stopping rule.
-# Measured on one crash-free file: median iRT ran 0.333 s at radius 10, 0.633 s
-# at 30, 0.700 s at 60 and above, with the p95 pinned exactly to the band edge.
+# fell inside [0, 3]. That loop was unsound twice over. It was tuning a knob
+# that bounded nothing, and its effect was not even monotonic -- on one file
+# the out-of-band fraction ran 63.1% at radius 120, 33.3% at 60, then 79.8% at
+# 30. It was chasing a real failure with no instrument able to catch it.
 # Estimates plateau by radius 60, so 120 leaves the upper tail unclipped.
 const DTW_RADIUS = 120
 
@@ -66,7 +77,7 @@ Stimulus-anchored instantaneous reaction time: for each stimulus frame, the
 mean timestamp of the user frames the warp path aligns to it, minus that
 stimulus frame's own timestamp. Positive means the user lagged the stimulus.
 
-Two things changed here.
+Three things changed here.
 
 1. Timestamps come from `flip_time` directly. The previous code multiplied the
    frame index by 1/60, but these data are sampled at 30 Hz (median frame
@@ -81,7 +92,10 @@ Two things changed here.
    that matters more is the NaN guard below: the scan indexed row 1 of its
    result without checking it was non-empty.
 
-Note on orientation: `fastdtw(x, y, ...)` returns `i1` indexing `x` and `i2`
+3. Alignment is a properly banded `dtw` rather than `fastdtw`, whose radius
+   argument never bounded the warp. See the note on `DTW_RADIUS`.
+
+Note on orientation: `dtw(x, y, ...)` returns `i1` indexing `x` and `i2`
 indexing `y` (verified against DynamicAxisWarping). Here `x` is the stimulus,
 so `i1` is a stimulus index and `i2` a user index. The previous code stored
 these in columns labelled the other way round and then subtracted against the
@@ -94,7 +108,10 @@ function compute_irt!(DF; radius::Int=DTW_RADIUS)
 	t = DF.flip_time
 	n = length(stim)
 
-	_, stim_idx, user_idx = fastdtw(stim, user, SqEuclidean(1e-12), radius)
+	# genuine Sakoe-Chiba limits; see the note on DTW_RADIUS for why this is
+	# `dtw` with explicit bounds rather than `fastdtw`
+	i2min, i2max = radiuslimits(radius, n, length(user))
+	_, stim_idx, user_idx = dtw(stim, user, SqEuclidean(1e-12), i2min, i2max)
 
 	sums = zeros(Float64, n)
 	counts = zeros(Int, n)

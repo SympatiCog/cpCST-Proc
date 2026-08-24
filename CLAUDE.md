@@ -24,7 +24,7 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --
 ```bash
 julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data
 
-# override the DTW band (default 120)
+# override the DTW band (default 120 samples = 4.0 s at 30 Hz)
 julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data --radius 60
 ```
 
@@ -51,9 +51,9 @@ resolves packages and is slower.
   carrying every column through. `plot_repair()` draws a diagnostic 3-panel plot, selecting the
   repaired frame **by time** (it is on a different grid; indexing it by row position from the
   original frame silently misaligns the traces).
-- **`compute_irt_parallel.jl`** — CLI script. FastDTW alignment of stimulus against user position;
-  emits stimulus-anchored `irt` plus the `dtw_radius` used. Per-file error isolation, so one bad
-  file warns rather than killing the run.
+- **`compute_irt_parallel.jl`** — CLI script. Banded DTW alignment of stimulus against user
+  position; emits stimulus-anchored `irt` plus the `dtw_radius` used. Per-file error isolation, so
+  one bad file warns rather than killing the run.
 - **`DTW.jl`** — Pluto notebook, now a thin front end that `include`s the script above. It used to
   hold a second copy of the pipeline; that duplication is how a sampling-rate error came to live
   in two places at once. Do not reintroduce logic here.
@@ -95,6 +95,23 @@ The second means **`flip_time` is the join key to physiology**. Never renumber o
 the output is destined for a physiological analysis. Note `CrashRepair.compute_transition()`
 violates this: it reassigns `flip_time` inside each repair window, displacing timestamps by up to
 1.276 s across ~14% of a crashy recording.
+
+## Do not use `fastdtw`
+
+`fastdtw`'s `radius` argument does **not** bound the warp. FastDTW coarsens the series, aligns at
+low resolution, projects that path up and refines within `radius` cells *of the projected path*,
+not of the diagonal — so a bad coarse alignment is inherited rather than corrected. Measured on one
+continuous-phase file at radius 120: offsets of −1584 and +1818 samples (−53 s, +61 s), 61.6% of
+the path outside the nominal radius, iRT values down to −52.8 s.
+
+Use `dtw` with explicit limits from `radiuslimits`, which is what the script does. It caps the
+offset at exactly `radius`, removes every whole-file failure in the corpus, leaves well-behaved
+files unchanged to three decimals, and runs ~3.7x faster at this series length.
+
+**Negative iRT is a useful health check.** It is physically impossible — the user cannot respond
+before the stimulus. With the banded estimator, 100% of the residual negatives in the continuous
+phase fall within 5 s of a repaired crash region, and no crash-free continuous file produces any.
+A crash-free recording with negative iRT means something new is wrong.
 
 ## Crash handling
 
