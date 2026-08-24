@@ -184,6 +184,11 @@ class CrashRepair:
         downstream code with no way to find the crashes.
         """
         t_src = data["flip_time"].values.astype(float)
+        if len(t_src) < 2 or t_src[-1] <= t_src[0]:
+            raise ValueError(
+                f"cannot resample {len(t_src)} sample(s) spanning "
+                f"{0.0 if len(t_src) < 2 else t_src[-1] - t_src[0]:.4f} s; "
+                "the recording is too short to define a grid")
         new_time_index = np.arange(t_src[0], t_src[-1], 1.0 / target_frequency)
 
         # source sample at or before each output sample
