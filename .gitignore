@@ -1,0 +1,12 @@
+# Pipeline outputs. The documented commands write ./processed_data and
+# ./irt_data into the repo root, and a full run is ~400 MB of derived data.
+processed_data/
+irt_data/
+
+# Written to the working directory by reproc_cpCST.py; both append across runs.
+errs.log
+crash_count.csv
+
+__pycache__/
+*.pyc
+.DS_Store

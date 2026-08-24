@@ -70,6 +70,11 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         # makes velocity undefined and the resulting NaN poisons detrend.
         keep = np.r_[True, np.diff(df.flip_time.values.astype(float)) > 0]
         df = df.loc[keep].reset_index(drop=True)
+        if len(df) < 2:
+            # aborted recordings do exist in this set: one file is two rows
+            # carrying the same timestamp, which is a single usable sample
+            print(f"skip (only {len(df)} usable sample(s)): {file_path}")
+            return
         ursi = get_ursi(str(file_path))
         crash_count = df.crash_count.max()
         with open("crash_count.csv",'a') as f:
