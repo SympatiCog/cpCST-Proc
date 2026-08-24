@@ -163,27 +163,62 @@ class CrashRepair:
             'flip_time': times
         })
 
+    # Columns that step rather than vary continuously; interpolating these
+    # linearly would invent fractional crash counts.
+    STEP_COLS = ("crash_count",)
+    # Whole-recording metadata, copied rather than interpolated.
+    CONSTANT_COLS = ("datetime_ended",)
+    # Rebuilt from crash_count after resampling rather than carried across it:
+    # a lone True survives a grid shift only by luck.
+    DERIVED_COLS = ("did_crash",)
+
     def resample_data(self, data, target_frequency=30):
-        # Calculate the new time index based on the target frequency
-        start_time = data['flip_time'].iloc[0]
-        end_time = data['flip_time'].iloc[-1]
-        new_time_index = np.arange(start_time, end_time, 1.0 / target_frequency)
+        """Resample onto a uniform grid, carrying every column through.
 
-        # Interpolate the data to the new time index
-        stim_interp = np.interp(new_time_index, data['flip_time'], data['stim_pos'])
-        user_interp = np.interp(new_time_index, data['flip_time'], data['user_pos'])
-        # Create a new DataFrame with the resampled data
-        resampled_data = pd.DataFrame({
-            'flip_time': new_time_index,
-            'stim_pos': stim_interp,
-            'user_pos': user_interp
-        })
+        Continuous signals are interpolated, step columns are held from the
+        preceding sample, non-numeric columns are copied, and did_crash is
+        re-derived from the resampled crash_count so the marker cannot be
+        dropped or duplicated by the grid shift.
 
-        return resampled_data
+        Previously this returned only flip_time/stim_pos/user_pos, which left
+        downstream code with no way to find the crashes.
+        """
+        t_src = data["flip_time"].values.astype(float)
+        new_time_index = np.arange(t_src[0], t_src[-1], 1.0 / target_frequency)
+
+        # source sample at or before each output sample
+        prev = np.clip(np.searchsorted(t_src, new_time_index, side="right") - 1,
+                       0, len(t_src) - 1)
+        # The uniform grid stops short of t_src[-1] by up to one frame, so a
+        # step transition in that final fraction of a sample would be dropped.
+        # These files routinely crash on the very last row, so extend the last
+        # output sample to cover through the end of the source.
+        prev[-1] = len(t_src) - 1
+
+        out = {"flip_time": new_time_index}
+        for col in data.columns:
+            if col == "flip_time" or col in self.DERIVED_COLS:
+                continue
+            values = data[col].values
+            if (col in self.STEP_COLS or col in self.CONSTANT_COLS
+                    or not np.issubdtype(values.dtype, np.number)):
+                out[col] = values[prev]
+            else:
+                out[col] = np.interp(new_time_index, t_src, values.astype(float))
+
+        resampled = pd.DataFrame(out)
+        if "crash_count" in resampled.columns:
+            resampled["did_crash"] = np.r_[
+                False, np.diff(resampled["crash_count"].values) > 0]
+        return resampled
 
     def repair_tracking(self):
         segments = self.find_crash_segments()
         repaired_data = self.data.copy()
+        # crash_count and did_crash are deliberately left intact -- overwriting
+        # them is what stopped downstream code from knowing where the crashes
+        # were. The extent of the repair is recorded separately instead.
+        repaired_data["was_repaired"] = False
 
         for segment in segments:
             transition_df = self.compute_transition(
@@ -206,22 +241,20 @@ class CrashRepair:
             repaired_data.loc[idx_range, 'stim_pos'] = transition_df['stim_pos'].values
             repaired_data.loc[idx_range, 'user_pos'] = transition_df['user_pos'].values
             repaired_data.loc[idx_range, 'flip_time'] = transition_df['flip_time'].values
-            repaired_data.loc[idx_range, 'did_crash'] = False
-            last_crash_count = repaired_data.loc[start_idx-1, 'crash_count'] if start_idx > 0 else 0
-            repaired_data.loc[idx_range, 'crash_count'] = last_crash_count
+            repaired_data.loc[idx_range, 'was_repaired'] = True
 
         repaired_data = self.resample_data(repaired_data, target_frequency=30)
         return repaired_data
 
     def plot_repair(self, repaired_data, segment_index=0):
-        """
-        Plot the original and repaired data for a specific crash segment.
+        """Plot original vs repaired data around one crash segment.
 
-        :param repaired_data: DataFrame containing the repaired data.
-        :param segment_index: Index of the crash segment to plot.
-        :return: Matplotlib figure object.
+        Selection is by TIME, not by row position. `repaired_data` has been
+        resampled onto its own grid and gains roughly 78 rows per crash, so
+        indexing it with positions taken from the original frame drew the two
+        traces against different stretches of the recording -- every diagnostic
+        plot this produced was silently misaligned.
         """
-
         segments = self.find_crash_segments()
         if segment_index >= len(segments):
             print(f"Warning: Segment index {segment_index} is out of range")
@@ -229,65 +262,43 @@ class CrashRepair:
 
         segment = segments[segment_index]
         crash_idx = segment['crash_idx']
-        window_size = int(2 * self.window_frame_count)
-        start_idx = crash_idx - window_size
-        end_idx = crash_idx + window_size
+        half_window = int(2 * self.window_frame_count)
+        # clamp rather than bail: a crash near either end is still worth seeing
+        start_idx = max(0, crash_idx - half_window)
+        end_idx = min(len(self.data) - 1, crash_idx + half_window)
 
-        # Check if the calculated indices are within bounds
-        if start_idx < 0:
-            print(f"Warning: Calculated start index {start_idx} is out of bounds.")
-            return
-        if end_idx >= len(self.data):
-            print(f"Warning: Calculated end index {end_idx} is out of bounds.")
-            return
+        orig = self.data.iloc[start_idx:end_idx + 1]
+        t_start = orig['flip_time'].iloc[0]
+        t_end = orig['flip_time'].iloc[-1]
+        rep = repaired_data[(repaired_data['flip_time'] >= t_start)
+                            & (repaired_data['flip_time'] <= t_end)]
+
+        reset_start = self.data['flip_time'].iloc[max(0, crash_idx - half_window // 2)]
+        reset_end = self.data['flip_time'].iloc[crash_idx]
 
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12))
-        ax1.plot(self.data.loc[start_idx:end_idx, 'flip_time'], 
-                self.data.loc[start_idx:end_idx, 'stim_pos'],
-                'r--', label='Original Stimulus')
-        ax1.plot(repaired_data.loc[start_idx:end_idx, 'flip_time'],
-                repaired_data.loc[start_idx:end_idx, 'stim_pos'],
-                'b-', label='Repaired Stimulus')
-        ax1.axvspan(
-            self.data.loc[crash_idx-(window_size/2), 'flip_time'],
-            self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
-            color='gray', alpha=0.2, label='Reset Period'
-        )
+
+        ax1.plot(orig['flip_time'], orig['stim_pos'], 'r--', label='Original Stimulus')
+        ax1.plot(rep['flip_time'], rep['stim_pos'], 'b-', label='Repaired Stimulus')
+        ax1.axvspan(reset_start, reset_end, color='gray', alpha=0.2, label='Reset Period')
         ax1.axhline(y=self.target_max_position, color='g', linestyle=':')
         ax1.axhline(y=-self.target_max_position, color='g', linestyle=':')
         ax1.set_ylabel('Stimulus Position')
         ax1.legend()
 
-        ax2.plot(self.data.loc[start_idx:end_idx, 'flip_time'],
-                self.data.loc[start_idx:end_idx, 'user_pos'],
-                'r--', label='Original User')
-        ax2.plot(repaired_data.loc[start_idx:end_idx, 'flip_time'],
-                repaired_data.loc[start_idx:end_idx, 'user_pos'],
-                'b-', label='Repaired User')
-        ax2.axvspan(
-            self.data.loc[crash_idx-(window_size/2), 'flip_time'],
-            self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
-            color='gray', alpha=0.2
-        )
+        ax2.plot(orig['flip_time'], orig['user_pos'], 'r--', label='Original User')
+        ax2.plot(rep['flip_time'], rep['user_pos'], 'b-', label='Repaired User')
+        ax2.axvspan(reset_start, reset_end, color='gray', alpha=0.2)
         ax2.axhline(y=self.target_max_position, color='g', linestyle=':')
         ax2.axhline(y=-self.target_max_position, color='g', linestyle=':')
         ax2.set_ylabel('User Position')
         ax2.legend()
 
-        stim_vel = repaired_data.loc[start_idx:end_idx, 'stim_pos'].diff() / \
-                  repaired_data.loc[start_idx:end_idx, 'flip_time'].diff()
-        user_vel = repaired_data.loc[start_idx:end_idx, 'user_pos'].diff() / \
-                  repaired_data.loc[start_idx:end_idx, 'flip_time'].diff()
-
         ax3.plot(self.data['flip_time'], self.data['stim_pos'], 'r--', label='Original Stimulus')
         ax3.plot(self.data['flip_time'], self.data['user_pos'], 'b--', label='Original User')
         ax3.plot(repaired_data['flip_time'], repaired_data['stim_pos'], 'm-', label='Repaired Stimulus')
         ax3.plot(repaired_data['flip_time'], repaired_data['user_pos'], 'g-', label='Repaired User')
-        ax3.axvspan(
-            self.data.loc[crash_idx-window_size, 'flip_time'],
-            self.data.loc[crash_idx, 'flip_time'] + segment['gap_duration'],
-            color='gray', alpha=0.2
-        )
+        ax3.axvspan(reset_start, reset_end, color='gray', alpha=0.2)
         ax3.set_ylabel('Position')
         ax3.set_xlabel('Time (s)')
         ax3.legend()

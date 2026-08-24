@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import traceback
 from glob import glob
 from scipy.signal import detrend
 import argparse
@@ -23,8 +24,31 @@ def parse_arguments():
     parser.add_argument("--detrend_vectors", action="store_true", required=False)
     return parser.parse_args()
 
+# Only these are detrended / z-scored. The loop used to run over every column
+# except flip_time, which now that the crash annotations survive would detrend
+# crash_count and coerce did_crash.
+SIGNAL_COLS = ("user_pos", "stim_pos", "tracking", "covary",
+               "abs_tracking", "abs_covary",
+               "user_pos_vel", "stim_pos_vel", "tracking_vel")
+
+REQUIRED_COLS = {"flip_time", "stim_pos", "user_pos", "crash_count"}
+
+
 def compute_velocity(df, target_col):
-    df[f"{target_col}_vel"] = df[target_col].diff().fillna(0) * df['flip_time'].diff().fillna(0) * 1000
+    """First derivative, in position units per second.
+
+    This was `diff(pos) * diff(t) * 1000` -- a multiplication where a division
+    belongs. With dt close to 1/30 the two land within 11% of each other
+    (dt*1000 = 33.3 against the correct 1/dt = 30), which is why it survived;
+    across a crash gap of dt = 2.58 s it is wrong by a factor of ~6600.
+
+    NOTE: the corrected column is on a different scale to every *_vel column
+    written by earlier runs. Old and new outputs are not comparable.
+    """
+    dt = df["flip_time"].diff()
+    vel = df[target_col].diff() / dt.where(dt > 0)
+    vel.iloc[0] = 0.0
+    df[f"{target_col}_vel"] = vel
 
 # def resample_data(data, target_frequency=30):
 #     new_time_index = np.arange(data['flip_time'].iloc[0], data['flip_time'].iloc[-1], 1.0 / target_frequency)
@@ -38,6 +62,14 @@ def compute_velocity(df, target_col):
 def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
     try:
         df = pd.read_csv(file_path)
+        if not REQUIRED_COLS.issubset(df.columns):
+            # LSL marker files live in the same folder and have a different schema
+            print(f"skip (not an events file): {file_path}")
+            return
+        # Every file in this set ends with a duplicated flip_time. A zero dt
+        # makes velocity undefined and the resulting NaN poisons detrend.
+        keep = np.r_[True, np.diff(df.flip_time.values.astype(float)) > 0]
+        df = df.loc[keep].reset_index(drop=True)
         ursi = get_ursi(str(file_path))
         crash_count = df.crash_count.max()
         with open("crash_count.csv",'a') as f:
@@ -64,15 +96,14 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         for col in ["user_pos", "stim_pos", "tracking"]:
             compute_velocity(df, col)
 
+        signal_cols = [c for c in SIGNAL_COLS if c in df.columns]
         if detrend_vectors:
-            for col in df.columns:
-                if col != "flip_time":
-                    df[col] = detrend(df[col])
+            for col in signal_cols:
+                df[col] = detrend(df[col])
 
         if zscale_vectors:
-            for col in df.columns:
-                if col != "flip_time":
-                    df[col] = zscale(df[col])
+            for col in signal_cols:
+                df[col] = zscale(df[col])
 
         # df = resample_data(df)
         
@@ -86,10 +117,13 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         
         df.user_pos = df.user_pos * -1
         df.to_csv(output_path / filename, index=False)
-    except:
+    except Exception:
+        # was a bare `except:`, which also swallowed KeyboardInterrupt and
+        # logged a filename with no indication of what went wrong
+        traceback.print_exc()
         print(f"err:{file_path}")
         with open("errs.log", 'a') as f:
-            f.write(f"{file_path}\n")
+            f.write(f"{file_path}\n{traceback.format_exc()}\n")
 
 def main():
     args = parse_arguments()
