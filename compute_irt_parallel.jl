@@ -108,6 +108,12 @@ function compute_irt!(DF; radius::Int=DTW_RADIUS)
 	t = DF.flip_time
 	n = length(stim)
 
+	# Below the band half-width the constraint is meaningless and the warp path
+	# collapses onto the diagonal, which yields iRT == 0 for every sample -- a
+	# value that looks like a measurement and is not one. Refuse instead.
+	n >= radius || error("$n samples is shorter than the DTW band ($radius); " *
+	                     "iRT is not defined for this recording")
+
 	# genuine Sakoe-Chiba limits; see the note on DTW_RADIUS for why this is
 	# `dtw` with explicit bounds rather than `fastdtw`
 	i2min, i2max = radiuslimits(radius, n, length(user))
