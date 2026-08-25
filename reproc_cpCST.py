@@ -22,6 +22,11 @@ def parse_arguments():
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--zscale_vectors", action="store_true", required=False)
     parser.add_argument("--detrend_vectors", action="store_true", required=False)
+    parser.add_argument("--max_seconds", type=float, default=None, required=False,
+                        help="Keep only the first N seconds of each recording, "
+                             "measured from its own first sample. Use to compare "
+                             "the full-length task against a LITE session on equal "
+                             "footing (CPT runs ~596 s, CPTLITE ~296 s).")
     return parser.parse_args()
 
 # Only these are detrended / z-scored. The loop used to run over every column
@@ -66,7 +71,27 @@ def compute_velocity(df, target_col):
 #     })
 #     return resampled_data
 
-def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
+def trim_to(df, max_seconds):
+    """Keep the first `max_seconds` of a recording, measured from its own start.
+
+    Applied at load, before repair and before alignment, so everything
+    downstream sees only the retained window. That ordering matters: DTW
+    aligns the series as a whole, so iRT computed on a full-length run and
+    then truncated is not the same as iRT computed on a run that was only
+    ever that long. The difference is small in aggregate -- 99%+ of samples
+    are identical and medians move by <0.04 s -- but individual samples
+    differ by up to ~2.9 s, and the point of trimming is to make the
+    comparison exact rather than approximate.
+
+    `flip_time` carries a task-onset offset of 1.0-11.2 s in this corpus, so
+    the window is relative to the first sample, never to absolute flip_time.
+    """
+    t = df["flip_time"].values.astype(float)
+    return df.loc[(t - t[0]) <= max_seconds].reset_index(drop=True)
+
+
+def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
+                 max_seconds=None):
     try:
         df = pd.read_csv(file_path)
         if not REQUIRED_COLS.issubset(df.columns):
@@ -77,6 +102,8 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
         # makes velocity undefined and the resulting NaN poisons detrend.
         keep = np.r_[True, np.diff(df.flip_time.values.astype(float)) > 0]
         df = df.loc[keep].reset_index(drop=True)
+        if max_seconds is not None and len(df) > 1:
+            df = trim_to(df, max_seconds)
         if len(df) < MIN_SAMPLES:
             span = (df.flip_time.iloc[-1] - df.flip_time.iloc[0]) if len(df) > 1 else 0.0
             print(f"skip (aborted recording: {len(df)} usable sample(s), "
@@ -125,6 +152,8 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors):
             filename += "_detrend"
         if zscale_vectors:
             filename += "_zscale"
+        if max_seconds is not None:
+            filename += f"_trim{max_seconds:g}s"
         filename += ".csv"
         
         df.user_pos = df.user_pos * -1
@@ -143,9 +172,12 @@ def main():
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    if args.max_seconds is not None:
+        print(f"trimming every recording to its first {args.max_seconds:g} s")
     for file_path in base_path.glob("*.csv"):
         print(file_path)
-        process_file(file_path, output_path, args.detrend_vectors, args.zscale_vectors)
+        process_file(file_path, output_path, args.detrend_vectors,
+                     args.zscale_vectors, args.max_seconds)
 
 if __name__ == "__main__":
     main()
