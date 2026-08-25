@@ -1,11 +1,18 @@
-# Pipeline outputs. The documented commands write ./processed_data and
-# ./irt_data into the repo root, and a full run is ~400 MB of derived data.
-processed_data/
-irt_data/
+# Pipeline outputs. The documented commands write ./processed_data, ./irt_data,
+# ./trimmed and ./trimmed_irt into the repo root, and a full run is ~400 MB of
+# derived data. The trailing wildcards matter: --max_seconds and --max_samples
+# encourage suffixed variants (processed_data_285, irt_data_8740samp, ...) and
+# the exact-name patterns did not catch those.
+processed_data*/
+irt_data*/
+trimmed*/
 
 # Written to the working directory by reproc_cpCST.py; both append across runs.
 errs.log
 crash_count.csv
+
+# Diagnostic plots written alongside the processed CSVs
+*_repaired.png
 
 __pycache__/
 *.pyc
