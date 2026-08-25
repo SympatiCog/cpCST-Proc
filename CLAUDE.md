@@ -29,10 +29,23 @@ full-length run and then truncated is not the same as iRT from a run that was on
 The difference is modest (99%+ of samples identical, medians within 0.04 s) but individual samples
 diverge by up to ~2.9 s, and the point of trimming is an exact comparison.
 
-Durations in this corpus: `CPT` 596.5 s, `CPTLITE` 296.4 s — almost exactly 2:1. Note 7 of 33
-`CPTLITE` runs fall short of 296 s, down to 291.30 s, so **`--max_seconds 291.3` is what gives
-every subject in both sessions equal N**; 296 leaves the short LITE runs untrimmed. Equal N matters
-for ICC and for anything N-sensitive — sample entropy above all.
+Durations in this corpus: `CPT` 596.5 s, `CPTLITE` 296.4 s — almost exactly 2:1. The shortest
+`CPTLITE` raw recording is 291.32 s, which caps any usable target.
+
+`--max_seconds` equalizes **duration**, which is what ICC wants — equal task exposure. It does not
+automatically equalize sample count. A cut that lands *inside* a crash gap keeps the pre-gap data,
+trims away the post-gap resumption, and so leaves that gap unrepaired and the file short. Three
+`CPTLITE` runs have a crash gap in their final 30 s, which is exactly where a sensible cut falls:
+
+| target | result across the 66 CPT/CPTLITE files |
+| --- | --- |
+| 291.3 s | 65 files at 8739 samples, 1 at 8671 (X10961871's gap spans 289.02–291.60 s) |
+| 288 s | 65 files at 8640, 1 at 8638 (X10961138's gap spans 287.92–290.50 s) |
+| **285 s** | **all 66 at exactly 8550 samples** — verified |
+
+Use **285** when equal N is wanted. For anything N-sensitive — sample entropy above all — check the
+counts rather than assuming, or truncate to the common minimum afterwards, which is robust to any
+target.
 
 ### Stage 2 — iRT computation (Julia)
 ```bash

@@ -44,10 +44,22 @@ Trimming happens at load, before repair and before alignment, and the output fil
 `_trim<N>s`. That ordering is deliberate — DTW aligns the whole series, so iRT from a full-length
 run that is then truncated differs from iRT of a run that was only ever that long.
 
-**Use 291.3, not 296.** Seven of the 33 `CPTLITE` runs are shorter than 296 s, bottoming out at
-291.30 s, so a 296 s cut leaves them untrimmed and subject N unequal. 291.3 gives every subject in
-both sessions exactly 8740 samples, which is what ICC — and anything N-sensitive like sample
-entropy — wants.
+**Use 285.** The shortest `CPTLITE` raw recording is 291.32 s, so that caps any target — but
+291.3 is not the right choice. `--max_seconds` equalizes *duration*, not sample count, and a cut
+landing inside a crash gap keeps the pre-gap data while trimming away the post-gap resumption,
+leaving that gap unrepaired and the file short. Three `CPTLITE` runs have a crash gap in their
+final 30 s:
+
+| target | result across the 66 CPT/CPTLITE files |
+| --- | --- |
+| 291.3 s | 65 files at 8739 samples, 1 at 8671 |
+| 288 s | 65 files at 8640, 1 at 8638 |
+| **285 s** | **all 66 at exactly 8550** |
+
+Equal duration is what ICC wants. Equal N additionally matters for anything N-sensitive — sample
+entropy above all, since SampEn is N-biased and unequal N between sessions becomes a systematic
+difference between the things being compared. If you use a different target, check the counts
+rather than assuming, or truncate to the common minimum afterwards.
 
 ## What comes out
 
