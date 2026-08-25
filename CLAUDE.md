@@ -18,7 +18,21 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data
 
 # with optional signal processing
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --detrend_vectors --zscale_vectors
+
+# trim every recording to its first N seconds (for full-vs-LITE comparison)
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_seconds 291.3
 ```
+
+`--max_seconds` trims at load, **before** repair and alignment, and tags the output filename
+`_trim<N>s`. The ordering is deliberate: DTW aligns the series as a whole, so iRT computed on a
+full-length run and then truncated is not the same as iRT from a run that was only ever that long.
+The difference is modest (99%+ of samples identical, medians within 0.04 s) but individual samples
+diverge by up to ~2.9 s, and the point of trimming is an exact comparison.
+
+Durations in this corpus: `CPT` 596.5 s, `CPTLITE` 296.4 s — almost exactly 2:1. Note 7 of 33
+`CPTLITE` runs fall short of 296 s, down to 291.30 s, so **`--max_seconds 291.3` is what gives
+every subject in both sessions equal N**; 296 leaves the short LITE runs untrimmed. Equal N matters
+for ICC and for anything N-sensitive — sample entropy above all.
 
 ### Stage 2 — iRT computation (Julia)
 ```bash
