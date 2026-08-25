@@ -18,6 +18,7 @@ julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data
 ```
 
 Add `--detrend_vectors --zscale_vectors` to stage 1 for optional signal processing.
+Add `--max_seconds N` to keep only the first N seconds of each recording — see below.
 Add `--radius N` to stage 2 to override the DTW band (default 120 samples, which bounds the warp
 to 4.0 s at 30 Hz).
 
@@ -28,6 +29,25 @@ to 4.0 s at 30 Hz).
 
 Julia packages are pinned in `Project.toml` / `Manifest.toml`; the first run resolves them.
 Python needs `pandas numpy scipy matplotlib`.
+
+## Comparing the full task against a LITE session
+
+`CPT` runs ~596 s and `CPTLITE` ~296 s, so a like-for-like comparison needs the full task cut down
+to the LITE duration:
+
+```bash
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_seconds 291.3
+julia --threads=auto compute_irt_parallel.jl ./trimmed ./trimmed_irt
+```
+
+Trimming happens at load, before repair and before alignment, and the output filename is tagged
+`_trim<N>s`. That ordering is deliberate — DTW aligns the whole series, so iRT from a full-length
+run that is then truncated differs from iRT of a run that was only ever that long.
+
+**Use 291.3, not 296.** Seven of the 33 `CPTLITE` runs are shorter than 296 s, bottoming out at
+291.30 s, so a 296 s cut leaves them untrimmed and subject N unequal. 291.3 gives every subject in
+both sessions exactly 8740 samples, which is what ICC — and anything N-sensitive like sample
+entropy — wants.
 
 ## What comes out
 
