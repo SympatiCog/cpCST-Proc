@@ -203,13 +203,22 @@ def main():
     args = parse_arguments()
     base_path = Path(args.base_path)
     output_path = Path(args.output_path)
+
+    # Fail loudly on a bad invocation. Both of these used to exit 0 having
+    # silently done nothing, which reads as success.
+    if not base_path.is_dir():
+        raise SystemExit(f"base_path is not a directory: {base_path}")
+    csv_files = sorted(base_path.glob("*.csv"))
+    if not csv_files:
+        raise SystemExit(f"no CSV files found in {base_path}")
+
     output_path.mkdir(parents=True, exist_ok=True)
 
     if args.max_seconds is not None:
         print(f"trimming every recording to its first {args.max_seconds:g} s")
     if args.max_samples is not None:
         print(f"truncating every recording to its first {args.max_samples} samples")
-    for file_path in base_path.glob("*.csv"):
+    for file_path in csv_files:
         print(file_path)
         process_file(file_path, output_path, args.detrend_vectors,
                      args.zscale_vectors, args.max_seconds, args.max_samples)
