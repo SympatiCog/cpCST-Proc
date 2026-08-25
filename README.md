@@ -56,10 +56,27 @@ final 30 s:
 | 288 s | 65 files at 8640, 1 at 8638 |
 | **285 s** | **all 66 at exactly 8550** |
 
-Equal duration is what ICC wants. Equal N additionally matters for anything N-sensitive — sample
-entropy above all, since SampEn is N-biased and unequal N between sessions becomes a systematic
-difference between the things being compared. If you use a different target, check the counts
-rather than assuming, or truncate to the common minimum afterwards.
+Equal duration is what ICC wants. If you need an exact **sample count** instead — which is what
+sample entropy needs, since SampEn is N-biased and unequal N between sessions becomes a systematic
+difference between the things being compared — use `--max_samples`:
+
+```bash
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_samples 8740
+```
+
+| | applied | guarantees |
+| --- | --- | --- |
+| `--max_seconds` | on raw samples, before repair | equal **duration** |
+| `--max_samples` | after repair and resampling | equal **N** |
+
+The different insertion point is the point. Trimming raw samples cannot guarantee an output count,
+because repair re-inserts ~78 samples per crash and the resample grid is rebuilt over whatever span
+survives. Truncating after the resample is immune to that: `--max_samples 8740` puts all 66
+CPT/CPTLITE files on exactly 8740 rows, including the 9 with crashes.
+
+**8740 is the largest value every CPT/CPTLITE file can supply.** Larger values start skipping files,
+and a value this large skips nearly every Calibrate run — correct, since a ~182 s calibration cannot
+supply 291 s of samples.
 
 ## What comes out
 

@@ -43,9 +43,38 @@ trims away the post-gap resumption, and so leaves that gap unrepaired and the fi
 | 288 s | 65 files at 8640, 1 at 8638 (X10961138's gap spans 287.92–290.50 s) |
 | **285 s** | **all 66 at exactly 8550 samples** — verified |
 
-Use **285** when equal N is wanted. For anything N-sensitive — sample entropy above all — check the
-counts rather than assuming, or truncate to the common minimum afterwards, which is robust to any
-target.
+Use **285** when equal N is wanted from a time-based cut.
+
+### `--max_samples`: an exact sample count
+
+```bash
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_samples 8740
+```
+
+Guarantees N by construction, which is what N-sensitive measures need. It applies at a **different
+point in the pipeline** from `--max_seconds`, and that is the whole reason it works:
+
+| | applied | guarantees |
+| --- | --- | --- |
+| `--max_seconds` | on raw samples, before repair | equal **duration** |
+| `--max_samples` | after repair and resampling, before the derived columns and detrend/z-scoring | equal **N** |
+
+Trimming raw samples could not guarantee an output count: repair re-inserts ~78 samples per crash
+and the resample grid is rebuilt over whatever span survives, so N in can become more than N out.
+Truncating after the resample is immune to that. Verified: `--max_samples 8740` puts all 66
+CPT/CPTLITE files on exactly 8740 rows, including the 9 containing crashes.
+
+Because truncation precedes the derived columns and detrend/z-scoring, every written column is
+computed on exactly the series that gets written — a CPT run z-scored under `--max_samples` is
+standardised over its retained window, not over the full 10 minutes.
+
+The cost is that repair may have drawn on context just beyond the cut, bounded by its ±3 s window.
+If that matters more than an exact N, use `--max_seconds`.
+
+**8740 is the largest value every CPT/CPTLITE file can supply** (the binding file is
+`X10919677_ses-MOBI2B_CPTLITE`). Anything larger and files start being skipped. Note that a value
+this large skips almost every Calibrate run, which is correct — a ~182 s calibration cannot supply
+291 s of samples — so point `--base_path` at continuous-phase files, or expect the skips.
 
 ### Stage 2 — iRT computation (Julia)
 ```bash
