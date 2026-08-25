@@ -140,8 +140,17 @@ function compute_irt!(DF; radius::Int=DTW_RADIUS)
 end
 
 function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS)
-	mkpath(destination_folder)
+	# Validate before doing anything. Omitting the destination used to reach
+	# mkpath(nothing) and fail with a MethodError pointing at an internal line
+	# rather than at the missing argument.
+	source_folder === nothing && error("source_folder is required")
+	destination_folder === nothing && error("destination_folder is required")
+	isdir(source_folder) || error("source folder does not exist: $source_folder")
+	radius > 0 || error("radius must be positive, got $radius")
+
 	csv_files = glob("*.csv", source_folder)
+	isempty(csv_files) && error("no CSV files found in $source_folder")
+	mkpath(destination_folder)
 	failures = Threads.Atomic{Int}(0)
 
 	Threads.@threads for file in csv_files
@@ -166,8 +175,10 @@ parser = ArgParseSettings()
 @add_arg_table parser begin
 	"source_folder"
 	help = "Path to the source folder containing CSV files"
+	required = true
 	"destination_folder"
 	help = "Path to the destination folder to save processed CSV files"
+	required = true
 	"--radius"
 	help = "DTW Sakoe-Chiba band half-width in samples (4.0 s at 30 Hz)"
 	arg_type = Int
