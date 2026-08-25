@@ -22,6 +22,11 @@ def parse_arguments():
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--zscale_vectors", action="store_true", required=False)
     parser.add_argument("--detrend_vectors", action="store_true", required=False)
+    parser.add_argument("--max_samples", type=int, default=None, required=False,
+                        help="Keep only the first N samples of each processed "
+                             "recording. Unlike --max_seconds this guarantees an "
+                             "exact sample count, which is what N-sensitive "
+                             "measures such as sample entropy need.")
     parser.add_argument("--max_seconds", type=float, default=None, required=False,
                         help="Keep only the first N seconds of each recording, "
                              "measured from its own first sample. Use to compare "
@@ -90,8 +95,28 @@ def trim_to(df, max_seconds):
     return df.loc[(t - t[0]) <= max_seconds].reset_index(drop=True)
 
 
+def truncate_to(df, max_samples):
+    """Keep the first `max_samples` rows of an already-processed recording.
+
+    Applied AFTER repair and resampling but BEFORE the derived columns and any
+    detrend/z-scoring, so every retained column is computed on exactly the
+    series that gets written.
+
+    This is deliberately a different insertion point from `trim_to`. Trimming
+    raw samples cannot guarantee an output count, because repair re-inserts
+    roughly 78 samples per crash and the resample grid is rebuilt over whatever
+    span survives -- so N samples in can become more than N samples out.
+    Truncating here is immune to that by construction.
+
+    The cost is that repair may have drawn on context from just beyond the cut,
+    bounded by its +/-3 s window. If that matters more than an exact N, use
+    --max_seconds instead.
+    """
+    return df.iloc[:max_samples].reset_index(drop=True)
+
+
 def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
-                 max_seconds=None):
+                 max_seconds=None, max_samples=None):
     try:
         df = pd.read_csv(file_path)
         if not REQUIRED_COLS.issubset(df.columns):
@@ -127,6 +152,12 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
             else:
                 print("No crash report generated")
         df = repaired_df
+        if max_samples is not None:
+            if len(df) < max_samples:
+                print(f"skip (only {len(df)} samples, fewer than the requested "
+                      f"{max_samples}): {file_path}")
+                return
+            df = truncate_to(df, max_samples)
         df["tracking"] = df.user_pos - df.stim_pos
         df["covary"] = np.abs(df.user_pos) - np.abs(df.stim_pos)
         df["abs_tracking"] = np.abs(df.tracking)
@@ -154,6 +185,8 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
             filename += "_zscale"
         if max_seconds is not None:
             filename += f"_trim{max_seconds:g}s"
+        if max_samples is not None:
+            filename += f"_trim{max_samples}samp"
         filename += ".csv"
         
         df.user_pos = df.user_pos * -1
@@ -174,10 +207,12 @@ def main():
 
     if args.max_seconds is not None:
         print(f"trimming every recording to its first {args.max_seconds:g} s")
+    if args.max_samples is not None:
+        print(f"truncating every recording to its first {args.max_samples} samples")
     for file_path in base_path.glob("*.csv"):
         print(file_path)
         process_file(file_path, output_path, args.detrend_vectors,
-                     args.zscale_vectors, args.max_seconds)
+                     args.zscale_vectors, args.max_seconds, args.max_samples)
 
 if __name__ == "__main__":
     main()
