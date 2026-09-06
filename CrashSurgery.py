@@ -99,11 +99,18 @@ def detect_events(df, fs=DEFAULT_FS, user_is_flipped=True, max_lookback_s=8.0,
     max_lb = int(max_lookback_s * fs)
 
     events = []
+    r_prev = 0
     for r in resets:
         if r < 2 or r >= len(t):
             continue
+        # The walk-back must not cross the previous reset. The reset row puts
+        # the stimulus at +/-0.005 with the error in the same sign, so it reads
+        # as "diverging" and an unbounded walk runs straight through it into the
+        # previous crash's runaway, reporting that crash's excursion as this
+        # one's onset.
         j = r - 1
-        floor = max(1, r - 1 - max_lb)
+        floor = max(1, r - 1 - max_lb, r_prev)
+        r_prev = r
         while j > floor and diverging[j]:
             j -= 1
         j += 1
@@ -177,7 +184,11 @@ def epoch_segments(annotated, min_samples=1):
     """Yield (epoch_id, index array) for each contiguous run of valid samples.
 
     These are the only spans an aligner may see; a warp path must never cross
-    a crash.
+    a crash. The aligner itself lives in ``compute_irt_parallel.jl``, which
+    walks these runs and blanks ``EDGE_MASK = 3`` samples at each end: DTW's
+    endpoint constraint pins the path there, so those estimates are artefacts.
+    The measured extent is one sample (MAE 0.34 s at the boundary, 0.006 s at
+    the next, 0.000 s thereafter), so 3 is already generous.
     """
     valid = annotated["is_valid"].values
     edges = np.flatnonzero(np.diff(np.r_[False, valid, False]))
@@ -186,27 +197,41 @@ def epoch_segments(annotated, min_samples=1):
             yield int(annotated["epoch"].values[a]), np.arange(a, b)
 
 
-def align_epochs(annotated, aligner, min_samples=180, edge_mask=3):
-    """Run `aligner(stim, user) -> irt` on each valid span independently.
+def plot_excision(annotated, events, zoom_s=6.0):
+    """Overview of the recording with every excised span shaded, plus one
+    zoomed panel per crash marking onset, reset and settle."""
+    import matplotlib.pyplot as plt
 
-    `edge_mask` blanks the first and last N samples of every span: DTW's
-    endpoint constraint pins the path there, so those estimates are artefacts.
-    Measured extent is a single sample (MAE 0.34 s at the boundary, 0.006 s at
-    the next, 0.000 s thereafter), so 3 is already generous. Do not inflate it
-    "to be safe" -- the cost lands directly on coverage, which is the scarce
-    resource here.
-    Returns a full-length iRT array with NaN wherever no estimate is defined.
-    """
-    irt = np.full(len(annotated), np.nan)
+    t = annotated["flip_time"].values.astype(float)
     s = annotated["stim_pos"].values.astype(float)
     u = annotated["user_pos"].values.astype(float)
-    for _, idx in epoch_segments(annotated, min_samples):
-        v = np.asarray(aligner(s[idx], u[idx]), float)
-        if edge_mask:
-            v[:edge_mask] = np.nan
-            v[-edge_mask:] = np.nan
-        irt[idx] = v
-    return irt
+    n = len(events)
+    fig, axes = plt.subplots(1 + n, 1, figsize=(12, 3 * (1 + n)), squeeze=False)
+    axes = axes[:, 0]
+
+    ax = axes[0]
+    ax.plot(t, s, "r-", lw=0.6, label="stim_pos")
+    ax.plot(t, u, "b-", lw=0.6, label="user_pos (flipped)")
+    for ev in events:
+        ax.axvspan(ev["onset_time"], ev["settle_time"], color="gray", alpha=0.3)
+    ax.set_ylabel("position")
+    ax.set_title(f"{n} crash(es); shaded spans are excised (is_valid == False)")
+    ax.legend(loc="upper right")
+
+    marks = (("onset_time", "k", "onset"), ("reset_time", "m", "reset"),
+             ("settle_time", "g", "settle"))
+    for ax, ev in zip(axes[1:], events):
+        m = (t >= ev["onset_time"] - zoom_s) & (t <= ev["settle_time"] + zoom_s)
+        ax.plot(t[m], s[m], "r.-", ms=2, lw=0.6, label="stim_pos")
+        ax.plot(t[m], u[m], "b.-", ms=2, lw=0.6, label="user_pos (flipped)")
+        ax.axvspan(ev["onset_time"], ev["settle_time"], color="gray", alpha=0.3)
+        for key, color, label in marks:
+            ax.axvline(ev[key], color=color, ls=":", label=label)
+        ax.set_ylabel("position")
+        ax.legend(loc="upper right")
+    axes[-1].set_xlabel("flip_time (s)")
+    fig.tight_layout()
+    return fig
 
 
 # --------------------------------------------------------------------------

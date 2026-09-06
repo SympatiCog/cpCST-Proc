@@ -1,4 +1,5 @@
-# Instantaneous reaction time (iRT) from stimulus/user tracking, via FastDTW.
+# Instantaneous reaction time (iRT) from stimulus/user tracking, via banded DTW,
+# aligned separately over each crash-free epoch.
 #
 # Environment: activate the project that sits next to this script, THEN add to
 # it. The original added to the default environment and activated a different
@@ -46,6 +47,13 @@ using Base.Threads
 # Estimates plateau by radius 60, so 120 leaves the upper tail unclipped.
 const DTW_RADIUS = 120
 
+# Samples blanked at each end of every aligned run. DTW's endpoint constraint
+# pins the warp path to the corners, so the estimates there are artefacts.
+# Measured extent is a single sample (MAE 0.34 s at the boundary, 0.006 s at
+# the next, 0.000 s thereafter), so 3 is already generous. Do not inflate it
+# "to be safe": the cost lands directly on coverage.
+const EDGE_MASK = 3
+
 const REQUIRED_COLS = ["flip_time", "stim_pos", "user_pos"]
 
 # Forward fill NaN values
@@ -55,6 +63,27 @@ function ffill!(vec)
 			vec[k] = vec[k-1]
 		end
 	end
+end
+
+# pandas writes booleans as True/False. CSV.jl parses those as Bool by
+# default, but be robust to a String column.
+as_bool(col) = eltype(col) <: Bool ? Vector{Bool}(col) :
+               [lowercase(string(x)) == "true" for x in col]
+
+"Contiguous runs of `true`, as index ranges."
+function valid_runs(valid::AbstractVector{Bool})
+	runs = UnitRange{Int}[]
+	start = 0
+	for k in eachindex(valid)
+		if valid[k] && start == 0
+			start = k
+		elseif !valid[k] && start != 0
+			push!(runs, start:k-1)
+			start = 0
+		end
+	end
+	start != 0 && push!(runs, start:length(valid))
+	return runs
 end
 
 # Load and preprocess CSV data
@@ -71,13 +100,20 @@ function load_cpCST_csv(filepath)
 end
 
 """
-    compute_irt!(DF; radius=DTW_RADIUS)
+    compute_irt!(DF; radius=DTW_RADIUS) -> skipped
 
 Stimulus-anchored instantaneous reaction time: for each stimulus frame, the
 mean timestamp of the user frames the warp path aligns to it, minus that
 stimulus frame's own timestamp. Positive means the user lagged the stimulus.
 
-Three things changed here.
+Alignment runs separately over each contiguous run of `is_valid` samples (a
+frame without that column is one all-valid run), so no warp path ever crosses
+a crash. Samples outside a run, the `EDGE_MASK` samples at each end of a run,
+and every sample of a run shorter than the band are NaN. Returns the number
+of runs skipped for being shorter than the band; `n_epochs_aligned` records
+the number aligned.
+
+Three earlier changes worth keeping in mind.
 
 1. Timestamps come from `flip_time` directly. The previous code multiplied the
    frame index by 1/60, but these data are sampled at 30 Hz (median frame
@@ -103,40 +139,59 @@ wrong labels, so the two errors cancelled and the arithmetic came out right.
 Naming them correctly here keeps that from being "fixed" into a sign flip.
 """
 function compute_irt!(DF; radius::Int=DTW_RADIUS)
-	stim = DF.stim_pos
-	user = DF.user_pos
-	t = DF.flip_time
-	n = length(stim)
-
-	# Below the band half-width the constraint is meaningless and the warp path
-	# collapses onto the diagonal, which yields iRT == 0 for every sample -- a
-	# value that looks like a measurement and is not one. Refuse instead.
-	n >= radius || error("$n samples is shorter than the DTW band ($radius); " *
+	n = nrow(DF)
+	valid = hasproperty(DF, :is_valid) ? as_bool(DF.is_valid) : trues(n)
+	irt = fill(NaN, n)
+	aligned = 0
+	skipped = 0
+	for rng in valid_runs(valid)
+		# Below the band half-width the constraint is meaningless and the warp
+		# path collapses onto the diagonal, which yields iRT == 0 for every
+		# sample -- a value that looks like a measurement and is not one.
+		if length(rng) < radius
+			skipped += 1
+			continue
+		end
+		align_run!(irt, DF.stim_pos, DF.user_pos, DF.flip_time, rng, radius)
+		aligned += 1
+	end
+	aligned > 0 || error("no crash-free epoch of at least $radius samples; " *
 	                     "iRT is not defined for this recording")
+
+	DF[!, :irt] = irt
+	DF[!, :dtw_radius] = fill(radius, n)
+	DF[!, :n_epochs_aligned] = fill(aligned, n)
+	return skipped
+end
+
+function align_run!(irt, stim, user, t, rng, radius)
+	n = length(rng)
+	s = collect(view(stim, rng))
+	u = collect(view(user, rng))
+	tt = view(t, rng)
 
 	# genuine Sakoe-Chiba limits; see the note on DTW_RADIUS for why this is
 	# `dtw` with explicit bounds rather than `fastdtw`
-	i2min, i2max = radiuslimits(radius, n, length(user))
-	_, stim_idx, user_idx = dtw(stim, user, SqEuclidean(1e-12), i2min, i2max)
+	i2min, i2max = radiuslimits(radius, n, n)
+	_, stim_idx, user_idx = dtw(s, u, SqEuclidean(1e-12), i2min, i2max)
 
 	sums = zeros(Float64, n)
 	counts = zeros(Int, n)
 	@inbounds for k in eachindex(stim_idx)
-		s = stim_idx[k]
-		sums[s] += t[user_idx[k]]
-		counts[s] += 1
+		si = stim_idx[k]
+		sums[si] += tt[user_idx[k]]
+		counts[si] += 1
 	end
-
-	irt = Vector{Float64}(undef, n)
-	@inbounds for s in 1:n
+	@inbounds for k in 1:n
 		# a stimulus frame absent from the path has no defined iRT; the old
 		# code indexed an empty frame and threw
-		irt[s] = counts[s] == 0 ? NaN : sums[s] / counts[s] - t[s]
+		irt[rng[k]] = counts[k] == 0 ? NaN : sums[k] / counts[k] - tt[k]
 	end
-
-	DF[!, :irt] = irt
-	DF[!, :dtw_radius] = fill(radius, n)
-	return DF
+	for k in 1:min(EDGE_MASK, n)
+		irt[rng[k]] = NaN
+		irt[rng[end - k + 1]] = NaN
+	end
+	return irt
 end
 
 function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS)
@@ -148,17 +203,21 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 	isdir(source_folder) || error("source folder does not exist: $source_folder")
 	radius > 0 || error("radius must be positive, got $radius")
 
-	csv_files = glob("*.csv", source_folder)
+	# stage 1 writes its crash event table into the same folder; it is not a
+	# recording and would otherwise be skipped with a warning on every run
+	csv_files = filter(f -> basename(f) != "crash_events.csv",
+	                   glob("*.csv", source_folder))
 	isempty(csv_files) && error("no CSV files found in $source_folder")
 	mkpath(destination_folder)
 	failures = Threads.Atomic{Int}(0)
+	short_epochs = Threads.Atomic{Int}(0)
 
 	Threads.@threads for file in csv_files
 		# isolate per file: the folder also holds LSL marker CSVs with an
 		# entirely different schema, and one of them used to kill the run
 		try
 			df = load_cpCST_csv(file)
-			compute_irt!(df; radius=radius)
+			Threads.atomic_add!(short_epochs, compute_irt!(df; radius=radius))
 			CSV.write(joinpath(destination_folder, basename(file)), df)
 		catch err
 			Threads.atomic_add!(failures, 1)
@@ -167,7 +226,8 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 	end
 
 	n_ok = length(csv_files) - failures[]
-	println("processed $(n_ok)/$(length(csv_files)) files at radius $radius")
+	println("processed $(n_ok)/$(length(csv_files)) files at radius $radius; " *
+	        "$(short_epochs[]) epoch(s) shorter than the band left NaN")
 	return n_ok
 end
 

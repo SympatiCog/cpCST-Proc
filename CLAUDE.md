@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **Continuous Phase** module of the cpCST (Continuous Phase Cognitive Stability Task) processing pipeline. It processes continuous motor tracking data where participants follow an unstable stimulus with a cursor, handles crash artifacts, and computes behavioural metrics — principally instantaneous reaction time (iRT).
+This is the **Continuous Phase** module of the cpCST (Continuous Phase Cognitive Stability Task) processing pipeline. It processes continuous motor tracking data where participants follow an unstable stimulus with a cursor, locates and excises crash artifacts, and computes behavioural metrics — principally instantaneous reaction time (iRT).
 
 Calibration Phase processing is a separate pipeline. It is **not present in this checkout** —
 the `../Calibration Phase/` path the previous version of this file pointed at does not exist,
@@ -19,11 +19,14 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data
 # with optional signal processing
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --detrend_vectors --zscale_vectors
 
+# legacy interpolation path, for reference only; outputs are tagged _interp
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --crash_mode interp
+
 # trim every recording to its first N seconds (for full-vs-LITE comparison)
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_seconds 291.3
 ```
 
-`--max_seconds` trims at load, **before** repair and alignment, and tags the output filename
+`--max_seconds` trims at load, **before** crash handling and alignment, and tags the output filename
 `_trim<N>s`. The ordering is deliberate: DTW aligns the series as a whole, so iRT computed on a
 full-length run and then truncated is not the same as iRT from a run that was only ever that long.
 The difference is modest (99%+ of samples identical, medians within 0.04 s) but individual samples
@@ -52,24 +55,23 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_sam
 ```
 
 Guarantees N by construction, which is what N-sensitive measures need. It applies at a **different
-point in the pipeline** from `--max_seconds`, and that is the whole reason it works:
+point in the pipeline** from `--max_seconds`:
 
 | | applied | guarantees |
 | --- | --- | --- |
-| `--max_seconds` | on raw samples, before repair | equal **duration** |
-| `--max_samples` | after repair and resampling, before the derived columns and detrend/z-scoring | equal **N** |
+| `--max_seconds` | on raw samples, before crash handling | equal **duration** |
+| `--max_samples` | after crash handling, before the derived columns and detrend/z-scoring | equal **N** |
 
-Trimming raw samples could not guarantee an output count: repair re-inserts ~78 samples per crash
-and the resample grid is rebuilt over whatever span survives, so N in can become more than N out.
-Truncating after the resample is immune to that. Verified: `--max_samples 8740` puts all 66
-CPT/CPTLITE files on exactly 8740 rows, including the 9 containing crashes.
+In surgery mode (the default) nothing is resampled, so the retained N rows are the first N rows of
+the original clock and the count **includes** rows marked `is_valid == False`. In interp mode the
+distinction is the whole reason `--max_samples` exists: trimming raw samples could not guarantee an
+output count, because repair re-inserts ~78 samples per crash and the resample grid is rebuilt over
+whatever span survives. Verified on the interp path: `--max_samples 8740` puts all 66 CPT/CPTLITE
+files on exactly 8740 rows, including the 9 containing crashes.
 
 Because truncation precedes the derived columns and detrend/z-scoring, every written column is
 computed on exactly the series that gets written — a CPT run z-scored under `--max_samples` is
 standardised over its retained window, not over the full 10 minutes.
-
-The cost is that repair may have drawn on context just beyond the cut, bounded by its ±3 s window.
-If that matters more than an exact N, use `--max_seconds`.
 
 **8740 is the largest value every CPT/CPTLITE file can supply** (the binding file is
 `<redacted>_ses-MOBI2B_CPTLITE`). Anything larger and files start being skipped. Note that a value
@@ -93,28 +95,37 @@ resolves packages and is slower.
 
 ## Architecture
 
-**Flow:** raw CSV → `reproc_cpCST.py` → `CrashRepair` → derived metrics → processed CSV
-→ `compute_irt_parallel.jl` (FastDTW) → CSV with `irt`
+**Flow:** raw CSV → `reproc_cpCST.py` → `CrashSurgery.prepare` (annotate on the original clock)
+→ derived metrics → processed CSV → `compute_irt_parallel.jl` (banded DTW per crash-free epoch)
+→ CSV with `irt`
 
 ### File Roles
 
-- **`reproc_cpCST.py`** — Entry point. Loads CSVs, invokes `CrashRepair`, computes
-  tracking/covary/velocity columns, optionally detrends and z-scores, writes output. Skips files
-  lacking `REQUIRED_COLS`. Appends to `errs.log` (with traceback) and `crash_count.csv`; both
-  accumulate across runs.
-- **`CrashRepair.py`** — Detects crash segments via `crash_count` diff, interpolates across gaps
-  with PCHIP splines, applies tanh damping and Savitzky-Golay smoothing, resamples to 30 Hz
-  carrying every column through. `plot_repair()` draws a diagnostic 3-panel plot, selecting the
-  repaired frame **by time** (it is on a different grid; indexing it by row position from the
-  original frame silently misaligns the traces).
+- **`reproc_cpCST.py`** — Entry point. Loads CSVs, runs crash handling (`--crash_mode`, default
+  `surgery`), computes tracking/covary/velocity columns, optionally detrends and z-scores, writes
+  output. Skips files lacking `REQUIRED_COLS`. Writes `crash_events.csv` and `<name>_excised.png`
+  to the output folder (overwritten per run). Appends to `errs.log` (with traceback) and
+  `crash_count.csv`; those two accumulate across runs.
+- **`CrashSurgery.py`** — The default crash handling. `detect_events` locates onset from the plant
+  identity, reset from the `crash_count` step, settle from the post-reset transient. `annotate`
+  adds `crash_phase`, `is_valid`, `epoch`, `time_since_crash`, `time_to_crash` without touching
+  a row or a timestamp. `plot_excision` draws the diagnostic. The LSL hand-off and binning helpers
+  (`onset_lsl_time`, `crash_markers`, `add_lsl_time`, `bin_to`, `entropy_segments`) are library
+  functions, not wired in.
+- **`CrashRepair.py`** — The legacy path, reachable via `--crash_mode interp`, kept for reference
+  and comparison. Interpolates across gaps with PCHIP splines, applies tanh damping and
+  Savitzky-Golay smoothing, resamples to 30 Hz. **Do not modify**: `tests/data/golden_interp.csv`
+  pins its output. `plot_repair()` selects the repaired frame **by time** (it is on a different
+  grid; indexing it by row position from the original frame silently misaligns the traces).
 - **`compute_irt_parallel.jl`** — CLI script. Banded DTW alignment of stimulus against user
-  position; emits stimulus-anchored `irt` plus the `dtw_radius` used. Per-file error isolation, so
-  one bad file warns rather than killing the run.
+  position, run separately over each contiguous `is_valid` run; emits stimulus-anchored `irt`,
+  `dtw_radius` and `n_epochs_aligned`. Per-file error isolation, so one bad file warns rather than
+  killing the run.
 - **`DTW.jl`** — Pluto notebook, now a thin front end that `include`s the script above. It used to
   hold a second copy of the pipeline; that duplication is how a sampling-rate error came to live
   in two places at once. Do not reintroduce logic here.
-- **`CrashSurgery.py`** — Exploratory prototype, **not wired into the pipeline**. Handles crashes
-  by excision rather than interpolation. See "Crash handling" below.
+- **`tests/`** — `python3 -m pytest tests -q` and `julia --threads=auto tests/test_irt.jl`.
+  `synth.py` builds recordings from the plant identity with injected crashes.
 
 ## Key Data Conventions
 
@@ -132,6 +143,11 @@ resolves packages and is slower.
 - **LSL marker files share the input folder** (`StimMarkers_alpha,lsl_timestamp,ext_time,hh_mm_ss`).
   Both stages skip them by schema. They are not corrupt — they are the physiological sync channel.
 - **NaN handling**: Julia uses forward-fill (`ffill!`) on position columns; a leading NaN survives.
+  In surgery mode `irt` is NaN wherever `is_valid` is False, at the first and last `EDGE_MASK = 3`
+  samples of every aligned epoch (so 6 per crash-free file), and throughout any epoch shorter
+  than the band. Velocity columns are NaN across the reset gap (dt > 2 frames).
+- **Scaling in surgery mode**: `--detrend_vectors` and `--zscale_vectors` fit on valid rows only
+  and apply to every row. Interp mode keeps its whole-series fit.
 - **Velocity units**: position units per second. Columns written before Aug 2026 used a different
   (incorrect) operator and are ~33x off; old and new outputs are not comparable.
 
@@ -148,9 +164,9 @@ The first means `|stim_pos|` grows exactly while `sign(e) == sign(stim_pos)`, wh
 onset with no tuned threshold. `CrashSurgery.check_plant_fit()` re-verifies it on new data.
 
 The second means **`flip_time` is the join key to physiology**. Never renumber or resample it if
-the output is destined for a physiological analysis. Note `CrashRepair.compute_transition()`
-violates this: it reassigns `flip_time` inside each repair window, displacing timestamps by up to
-1.276 s across ~14% of a crashy recording.
+the output is destined for a physiological analysis. Surgery mode honours this by construction.
+`CrashRepair.compute_transition()` (interp mode) violates it: it reassigns `flip_time` inside each
+repair window, displacing timestamps by up to 1.276 s across ~14% of a crashy recording.
 
 ## Do not use `fastdtw`
 
@@ -165,19 +181,26 @@ offset at exactly `radius`, removes every whole-file failure in the corpus, leav
 files unchanged to three decimals, and runs ~3.7x faster at this series length.
 
 **Negative iRT is a useful health check.** It is physically impossible — the user cannot respond
-before the stimulus. With the banded estimator, 100% of the residual negatives in the continuous
-phase fall within 5 s of a repaired crash region, and no crash-free continuous file produces any.
-A crash-free recording with negative iRT means something new is wrong.
+before the stimulus. Verified 2026-09-06 on the 66 CPT/CPTLITE files: surgery mode produces **no
+negative iRT in any file**; interp mode produces 2192 negative samples across 11 of the 15 crashy
+files, all within 5 s of a repaired region. Any negative iRT under surgery mode means something
+new is wrong.
 
 ## Crash handling
 
-`CrashRepair` interpolates across crashes. On a ground-truth test (crash-free recordings with
-synthetic crashes injected) this recovers iRT **worse than doing nothing**, because `smooth_dampen`
-is not identity-preserving near zero and compresses the whole ±3 s window, and because the 2.583 s
-controller-reset dead time is filled with roughly 78 fabricated samples per crash.
+Surgery (default) excises `[onset .. settle]` by marking it `is_valid == False` on the original
+clock; the Julia stage aligns each crash-free epoch independently. Interp (`--crash_mode interp`)
+is `CrashRepair`, which interpolates across crashes. On a ground-truth test (crash-free recordings
+with synthetic crashes injected) interpolation recovers iRT **worse than doing nothing**, because
+`smooth_dampen` is not identity-preserving near zero and compresses the whole ±3 s window, and
+because the 2.583 s controller-reset dead time is filled with roughly 78 fabricated samples per
+crash. Excision is several times more accurate on the same test.
 
-`CrashSurgery.py` is the alternative: excise `[onset .. re-acquisition]`, mark it NaN on the
-original clock, and align each crash-free epoch independently. If working on either, note:
+Corpus numbers (66 continuous files, 15 crashy): excision marks 0.6–7.5% of a crashy file invalid;
+three files crash within 4 s of the end and leave a stub epoch shorter than the band, which stays
+NaN (`n_epochs_aligned` is then one less than crashes + 1).
+
+If working on `CrashSurgery`, note:
 
 - `boundary_frac` defaults to **0.05**, not a larger value. At 0.35 the retained samples still
   inflate the signal SD by 2.7x, which wrecks anything scaled by SD — sample entropy's tolerance
@@ -185,8 +208,9 @@ original clock, and align each crash-free epoch independently. If working on eit
 - The iRT series decorrelates in ~1.0 s while crash spans run 3-5 s. Filling those gaps is not
   recoverable interpolation; no fill beats the series median, and a smooth fill injects fabricated
   structure exactly where the physiological response to the crash lives.
-- `edge_mask` needs to be **3**, not the DTW radius. The endpoint artefact is one sample wide;
-  inflating it costs coverage directly.
+- `EDGE_MASK` in the Julia script is **3**, not the DTW radius. The endpoint artefact is one sample
+  wide; inflating it costs coverage directly.
+- At the reset row both `time_since_crash` and `time_to_crash` are 0.
 
 ## Dependencies
 

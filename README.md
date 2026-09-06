@@ -10,7 +10,7 @@ Calibration Phase processing is a separate pipeline, not included in this reposi
 ## Quick start
 
 ```bash
-# Stage 1 — Python: repair, derive metrics
+# Stage 1 — Python: locate and excise crashes, derive metrics
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data
 
 # Stage 2 — Julia: DTW alignment, iRT
@@ -19,6 +19,8 @@ julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data
 
 Add `--detrend_vectors --zscale_vectors` to stage 1 for optional signal processing.
 Add `--max_seconds N` to keep only the first N seconds of each recording — see below.
+Add `--crash_mode interp` to stage 1 to run the legacy interpolation path instead — see
+"Crash handling".
 Add `--radius N` to stage 2 to override the DTW band (default 120 samples, which bounds the warp
 to 4.0 s at 30 Hz).
 
@@ -28,7 +30,18 @@ to 4.0 s at 30 Hz).
 ### Dependencies
 
 Julia packages are pinned in `Project.toml` / `Manifest.toml`; the first run resolves them.
-Python needs `pandas numpy scipy matplotlib`.
+Python needs `pandas numpy scipy matplotlib`, plus `pytest` for the tests.
+
+### Tests
+
+```bash
+python3 -m pytest tests -q
+julia --threads=auto tests/test_irt.jl
+```
+
+`tests/synth.py` builds recordings from the plant identity with crashes injected, so the
+detection and annotation tests need no corpus. `tests/data/golden_interp.csv` pins the interp
+path's output; it must not change.
 
 ## Comparing the full task against a LITE session
 
@@ -66,13 +79,16 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_sam
 
 | | applied | guarantees |
 | --- | --- | --- |
-| `--max_seconds` | on raw samples, before repair | equal **duration** |
-| `--max_samples` | after repair and resampling | equal **N** |
+| `--max_seconds` | on raw samples, before crash handling | equal **duration** |
+| `--max_samples` | after crash handling, before the derived columns | equal **N** |
 
-The different insertion point is the point. Trimming raw samples cannot guarantee an output count,
-because repair re-inserts ~78 samples per crash and the resample grid is rebuilt over whatever span
-survives. Truncating after the resample is immune to that: `--max_samples 8740` puts all 66
-CPT/CPTLITE files on exactly 8740 rows, including the 9 with crashes.
+In surgery mode the two coincide more closely than they used to, because nothing is resampled:
+`--max_samples` keeps the first N rows on the original clock, and that count **includes** rows
+marked invalid. In interp mode the different insertion point is the point: trimming raw samples
+cannot guarantee an output count, because repair re-inserts ~78 samples per crash and the resample
+grid is rebuilt over whatever span survives. Truncating after the resample is immune to that:
+`--max_samples 8740` puts all 66 CPT/CPTLITE files on exactly 8740 rows, including the 9 with
+crashes.
 
 **8740 is the largest value every CPT/CPTLITE file can supply.** Larger values start skipping files,
 and a value this large skips nearly every Calibrate run — correct, since a ~182 s calibration cannot
@@ -84,11 +100,31 @@ Stage 2 writes one CSV per input with the source columns plus:
 
 | Column | Meaning |
 | --- | --- |
-| `irt` | Stimulus-anchored instantaneous reaction time, seconds. Positive = user lagged the stimulus. |
+| `irt` | Stimulus-anchored instantaneous reaction time, seconds. Positive = user lagged the stimulus. NaN where undefined (see below). |
 | `dtw_radius` | The DTW band actually used, recorded so results carry their own provenance. |
+| `n_epochs_aligned` | How many crash-free epochs were long enough to align. Constant per file. |
 | `crash_count` | Cumulative crashes, stepping at each reset. |
 | `did_crash` | True on the first sample after a reset. |
-| `was_repaired` | True where `CrashRepair` rewrote the signal. |
+| `crash_phase` | `ok`, `runaway` (control lost, stimulus diverging) or `reacquire` (post-reset transient). |
+| `is_valid` | False from crash onset through re-acquisition. The only rows the aligner sees are the True ones. |
+| `epoch` | 0 before the first reset, +1 at each reset. |
+| `time_since_crash` | Seconds since the most recent reset; NaN before the first. |
+| `time_to_crash` | Seconds until the next reset; NaN after the last. |
+
+`irt` is NaN wherever `is_valid` is False, at the first and last 3 samples of every aligned
+epoch (DTW's endpoint constraint pins the path there; the artefact is one sample wide), and
+throughout any epoch shorter than the DTW band (120 samples), where the warp would collapse onto
+the diagonal and report iRT = 0 for every sample. Three corpus files crash within 4 s of the
+end and leave such a stub.
+
+Interp-mode outputs (`--crash_mode interp`) carry `was_repaired` instead of the five annotation
+columns, and are tagged `_interp` in the filename.
+
+Stage 1 also writes `crash_events.csv` to the output folder — one row per detected crash with
+onset, reset and settle times and durations — and a `<name>_excised.png` diagnostic for every
+crashy file. A surgery run starts a fresh table; an interp run into the same folder leaves it
+alone. A file skipped by `--max_samples` contributes no rows and no plot, so every row in the
+table has a matching output CSV.
 
 ## Things that will bite you
 
@@ -109,9 +145,20 @@ This is long-standing behaviour, left alone deliberately — which convention sh
 research decision, not a cleanup.
 
 **Negative iRT means something is wrong.** The user cannot respond before the stimulus, so a
-negative value is a direct read on alignment failure. In the continuous phase 100% of them fall
-within 5 s of a repaired crash region, and no crash-free recording produces any — so a clean
-recording with negative iRT is worth investigating rather than filtering.
+negative value is a direct read on alignment failure. On the 66 continuous-phase files
+(15 crashy), measured 2026-09-06:
+
+| | surgery | interp |
+| --- | --- | --- |
+| files with negative iRT | 0 | 11 |
+| negative iRT samples | 0 | 2192 |
+
+Every interp-mode negative falls within 5 s of a repaired crash. Under surgery mode any negative
+iRT is worth investigating rather than filtering.
+
+**The first and last 3 iRT samples of every epoch are NaN**, in both modes, so every file has at
+least 6 NaN samples. Downstream code that assumes a fully finite `irt` column needs a NaN-aware
+read.
 
 **`errs.log` and `crash_count.csv` append.** Clear them between runs if you want an accurate count.
 
@@ -145,19 +192,41 @@ Note that `CrashRepair` currently violates this: it reassigns `flip_time` inside
 window, displacing timestamps by up to 1.276 s across roughly 14% of a crashy recording. If you are
 aligning behaviour to heart rate or EEG, that matters.
 
-## Crash handling, and an open question
+## Crash handling
 
-`CrashRepair` heals crashes: it interpolates across them with PCHIP splines, damps the excursion,
-and resamples. Tested against ground truth — crash-free recordings with synthetic crashes injected
-between untouched segments — this recovers iRT **worse than not repairing at all**, and it is the
-only approach tested that perturbs iRT far from any crash.
+When control is lost the stimulus runs to the screen boundary, the controller resets, and about
+2.58 s pass with nothing logged. The default path, **surgery**, treats that as what it is: a gap.
 
-`CrashSurgery.py` is a prototype of the alternative: excise the crash region, mark it NaN on the
-original clock, and align each crash-free epoch independently, so no warp path crosses a crash and
-nothing is fabricated. On the same test it is several times more accurate. It is **not wired into
-the pipeline**; adopting it is a decision, not a merge.
+- **Onset** is located from the plant identity — the first sample of the terminal divergence
+  where `|stim_pos|` has passed 5% of the boundary. No tuned threshold.
+- **Reset** is where `crash_count` steps. **Settle** is the end of the post-reset transient.
+  The onset search never walks back past the previous reset: the reset row places the stimulus
+  at ±0.005 with the error in the same sign, so it reads as "diverging", and an unbounded walk
+  would hand a back-to-back crash the previous crash's runaway as its onset.
+- Every row from onset through settle is marked `is_valid = False`. No row is added, removed
+  or retimed; `flip_time` is untouched, so the output still joins to physiology.
+- The Julia stage aligns each contiguous valid run on its own, so no warp path crosses a crash.
+- Velocity is NaN across the reset gap. Detrend and z-score fit on valid rows only and apply to
+  every row: a single excursion inflates the whole-series SD by up to 2.7x, and fitting on it
+  would put crash count into the scale of every scaled column.
 
-The trade is real and it is the open question here: excision marks a median 14% of a crashy
-recording as missing (up to 35%), against a series with no invented values in it. Two thirds of
-that loss is controller-reset dead time during which no samples were logged at all — data the
-current pipeline reports as present by synthesising it.
+On a ground-truth test (crash-free recordings with synthetic crashes injected) this is several
+times more accurate than interpolation, and it perturbs nothing far from a crash.
+
+The cost is coverage: excision marks a median 14% of a *crashy* recording as missing, up to 35%,
+but only 15 of the 66 continuous-phase files crash at all, and across the continuous phase the
+loss is 0.65% of recording time. Two thirds of it is controller dead time during which no samples
+were logged; the interpolation path reports that time as present by synthesising it.
+
+### The legacy path, kept for reference
+
+`--crash_mode interp` runs `CrashRepair`: PCHIP interpolation across each crash, tanh damping,
+Savitzky-Golay smoothing, and a resample to a uniform 30 Hz grid. It is unchanged and its output
+is pinned by a golden-file test. Know what it does before using it:
+
+- It fabricates ~78 samples per crash and reassigns `flip_time` inside each ±3 s repair window,
+  displacing timestamps by up to 1.276 s across ~14% of a crashy recording. Its outputs do not
+  join cleanly to physiology.
+- On the ground-truth test it recovers iRT **worse than doing nothing**, because `smooth_dampen`
+  is not identity-preserving near zero and compresses the whole window.
+- Its outputs are tagged `_interp` so a folder can never hold an ambiguous mix.

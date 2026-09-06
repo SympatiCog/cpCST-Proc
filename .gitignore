@@ -13,7 +13,9 @@ crash_count.csv
 
 # Diagnostic plots written alongside the processed CSVs
 *_repaired.png
+*_excised.png
 
 __pycache__/
 *.pyc
+.pytest_cache/
 .DS_Store
