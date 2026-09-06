@@ -203,7 +203,10 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 	isdir(source_folder) || error("source folder does not exist: $source_folder")
 	radius > 0 || error("radius must be positive, got $radius")
 
-	csv_files = glob("*.csv", source_folder)
+	# stage 1 writes its crash event table into the same folder; it is not a
+	# recording and would otherwise be skipped with a warning on every run
+	csv_files = filter(f -> basename(f) != "crash_events.csv",
+	                   glob("*.csv", source_folder))
 	isempty(csv_files) && error("no CSV files found in $source_folder")
 	mkpath(destination_folder)
 	failures = Threads.Atomic{Int}(0)
