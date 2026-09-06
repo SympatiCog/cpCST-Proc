@@ -71,6 +71,17 @@ def test_two_crashes_give_three_epochs():
     assert [k for k, _ in segs] == [0, 1, 2]
 
 
+def test_back_to_back_crash_does_not_walk_into_previous_crash():
+    # the second crash starts at the first reset: no re-acquisition between
+    ann, ev = cs.prepare(load(crash_times=(20.0, 22.0)))
+    assert len(ev) == 2
+    assert ev[1]["onset"] > ev[0]["reset"]
+    assert ev[1]["runaway_s"] < 3.0
+    # everything from the first onset to the second settle is excised
+    v = ann["is_valid"].values
+    assert not v[ev[0]["onset"]:ev[1]["settle"] + 1].any()
+
+
 def test_align_epochs_removed():
     assert not hasattr(cs, "align_epochs")
 

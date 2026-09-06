@@ -15,6 +15,9 @@ LAMBDA = 0.15
 GAIN = 3.0
 RESET_GAP_S = 2.583
 BOUNDARY = 0.5
+# The corpus resets the stimulus to +/-0.005, not 0, with the user at 0, so the
+# reset row's error shares the stimulus's sign and reads as "diverging".
+RESET_STIM = 0.005
 
 
 def make_recording(duration_s=60.0, crash_times=(), seed=0, t0=3.5):
@@ -42,7 +45,7 @@ def make_recording(duration_s=60.0, crash_times=(), seed=0, t0=3.5):
                 push(sgn * 0.6)
             state["t"] += RESET_GAP_S - DT
             state["cc"] += 1
-            state["stim"] = 0.0
+            state["stim"] = RESET_STIM
             state["did_crash"] = True
             settle_left = 15
             continue

@@ -99,11 +99,18 @@ def detect_events(df, fs=DEFAULT_FS, user_is_flipped=True, max_lookback_s=8.0,
     max_lb = int(max_lookback_s * fs)
 
     events = []
+    r_prev = 0
     for r in resets:
         if r < 2 or r >= len(t):
             continue
+        # The walk-back must not cross the previous reset. The reset row puts
+        # the stimulus at +/-0.005 with the error in the same sign, so it reads
+        # as "diverging" and an unbounded walk runs straight through it into the
+        # previous crash's runaway, reporting that crash's excursion as this
+        # one's onset.
         j = r - 1
-        floor = max(1, r - 1 - max_lb)
+        floor = max(1, r - 1 - max_lb, r_prev)
+        r_prev = r
         while j > floor and diverging[j]:
             j -= 1
         j += 1
