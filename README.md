@@ -122,7 +122,9 @@ columns, and are tagged `_interp` in the filename.
 
 Stage 1 also writes `crash_events.csv` to the output folder — one row per detected crash with
 onset, reset and settle times and durations — and a `<name>_excised.png` diagnostic for every
-crashy file. Both are overwritten per run.
+crashy file. A surgery run starts a fresh table; an interp run into the same folder leaves it
+alone. A file skipped by `--max_samples` contributes no rows and no plot, so every row in the
+table has a matching output CSV.
 
 ## Things that will bite you
 
@@ -143,9 +145,20 @@ This is long-standing behaviour, left alone deliberately — which convention sh
 research decision, not a cleanup.
 
 **Negative iRT means something is wrong.** The user cannot respond before the stimulus, so a
-negative value is a direct read on alignment failure. In the continuous phase 100% of them fall
-within 5 s of a repaired crash region, and no crash-free recording produces any — so a clean
-recording with negative iRT is worth investigating rather than filtering.
+negative value is a direct read on alignment failure. On the 66 continuous-phase files
+(15 crashy), measured 2026-09-06:
+
+| | surgery | interp |
+| --- | --- | --- |
+| files with negative iRT | 0 | 11 |
+| negative iRT samples | 0 | 2192 |
+
+Every interp-mode negative falls within 5 s of a repaired crash. Under surgery mode any negative
+iRT is worth investigating rather than filtering.
+
+**The first and last 3 iRT samples of every epoch are NaN**, in both modes, so every file has at
+least 6 NaN samples. Downstream code that assumes a fully finite `irt` column needs a NaN-aware
+read.
 
 **`errs.log` and `crash_count.csv` append.** Clear them between runs if you want an accurate count.
 
@@ -187,6 +200,9 @@ When control is lost the stimulus runs to the screen boundary, the controller re
 - **Onset** is located from the plant identity — the first sample of the terminal divergence
   where `|stim_pos|` has passed 5% of the boundary. No tuned threshold.
 - **Reset** is where `crash_count` steps. **Settle** is the end of the post-reset transient.
+  The onset search never walks back past the previous reset: the reset row places the stimulus
+  at ±0.005 with the error in the same sign, so it reads as "diverging", and an unbounded walk
+  would hand a back-to-back crash the previous crash's runaway as its onset.
 - Every row from onset through settle is marked `is_valid = False`. No row is added, removed
   or retimed; `flip_time` is untouched, so the output still joins to physiology.
 - The Julia stage aligns each contiguous valid run on its own, so no warp path crosses a crash.
