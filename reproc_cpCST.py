@@ -209,6 +209,14 @@ def excise(df, file_path, ursi, output_path):
     return annotated
 
 
+def too_short(df, max_samples, file_path):
+    if max_samples is not None and len(df) < max_samples:
+        print(f"skip (only {len(df)} samples, fewer than the requested "
+              f"{max_samples}): {file_path}")
+        return True
+    return False
+
+
 def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
                  max_seconds=None, max_samples=None, crash_mode="surgery"):
     try:
@@ -234,16 +242,19 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
             f.write(f"{ursi},{crash_count}\n")
 
         df.user_pos = df.user_pos * -1
+        if crash_mode not in CRASH_MODES:
+            raise ValueError(f"unknown crash_mode {crash_mode!r}; choose from {CRASH_MODES}")
+        # Surgery adds no rows, so the --max_samples gate can run before it and
+        # a skipped file leaves no event rows or plot behind. Interp gains
+        # ~78 rows per crash, so its gate has to wait for the repaired length.
+        if crash_mode == "surgery" and too_short(df, max_samples, file_path):
+            return
         if crash_mode == "interp":
             df = repair_by_interpolation(df, file_path, output_path)
-        elif crash_mode == "surgery":
-            df = excise(df, file_path, ursi, output_path)
         else:
-            raise ValueError(f"unknown crash_mode {crash_mode!r}; choose from {CRASH_MODES}")
+            df = excise(df, file_path, ursi, output_path)
         if max_samples is not None:
-            if len(df) < max_samples:
-                print(f"skip (only {len(df)} samples, fewer than the requested "
-                      f"{max_samples}): {file_path}")
+            if too_short(df, max_samples, file_path):
                 return
             df = truncate_to(df, max_samples)
         df["tracking"] = df.user_pos - df.stim_pos
@@ -309,7 +320,10 @@ def main():
         raise SystemExit(f"no CSV files found in {base_path}")
 
     output_path.mkdir(parents=True, exist_ok=True)
-    reset_events(output_path)
+    # Only a surgery run owns the event table. An interp run into the same
+    # folder must leave an earlier surgery run's table alone.
+    if args.crash_mode == "surgery":
+        reset_events(output_path)
 
     print(f"crash handling: {args.crash_mode}")
     if args.max_seconds is not None:

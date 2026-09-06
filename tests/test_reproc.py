@@ -89,6 +89,25 @@ def test_events_file_is_fresh_per_run(tmp_path):
     assert len(ev) == 2
 
 
+def test_surgery_skip_on_max_samples_leaves_no_trace(tmp_path):
+    out = run(tmp_path, "surgery", max_samples=100000)
+    assert list(out.iterdir()) == []
+
+
+def test_interp_run_keeps_surgery_event_table(tmp_path, monkeypatch):
+    src = tmp_path / "raw"
+    src.mkdir()
+    (src / "synth_crash.csv").write_bytes((DATA / "synth_crash.csv").read_bytes())
+    out = tmp_path / "o"
+    monkeypatch.chdir(tmp_path)               # crash_count.csv lands here
+    for mode in ("surgery", "interp"):
+        monkeypatch.setattr("sys.argv", ["reproc_cpCST.py", "--base_path", str(src),
+                                         "--output_path", str(out), "--crash_mode", mode])
+        r.main()
+    assert len(pd.read_csv(out / r.EVENTS_FILE)) == 2
+    assert (out / "synth_crash.csv").exists() and (out / "synth_crash_interp.csv").exists()
+
+
 def test_surgery_max_samples_counts_invalid_rows(tmp_path):
     out = run(tmp_path, "surgery", max_samples=1000)
     got = pd.read_csv(out / "synth_crash_trim1000samp.csv")
