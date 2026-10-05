@@ -1,7 +1,16 @@
+# Plots are only ever saved, never shown. Pin a non-interactive backend before
+# anything imports pyplot: with --jobs > 1 every worker re-imports this module,
+# and an interactive backend in a worker process hangs or warns by platform.
+import matplotlib
+matplotlib.use("Agg")
+
 import pandas as pd
 import numpy as np
+import os
+import sys
 import traceback
-from glob import glob
+import multiprocessing
+from functools import partial
 from scipy.signal import detrend
 import argparse
 from pathlib import Path
@@ -39,6 +48,10 @@ def parse_arguments():
                              "measured from its own first sample. Use to compare "
                              "the full-length task against a LITE session on equal "
                              "footing (CPT runs ~596 s, CPTLITE ~296 s).")
+    parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                        help="Worker processes (default: one per CPU). Files are "
+                             "independent; --jobs 1 runs serially in this process, "
+                             "which is the easier way to debug.")
     return parser.parse_args()
 
 # Only these are detrended / z-scored. The loop used to run over every column
@@ -60,7 +73,9 @@ MIN_SAMPLES = 30
 CRASH_MODES = ("surgery", "interp")
 
 # One row per detected crash, written to the output folder. Unlike errs.log
-# and crash_count.csv this is overwritten per run, not appended.
+# and crash_count.csv this is overwritten per run, not appended. All three are
+# written only by record_result(), in the parent process, so parallel workers
+# never append to the same file.
 EVENTS_FILE = "crash_events.csv"
 EVENT_COLS = ("file", "ursi", "k", "onset_time", "reset_time", "settle_time",
               "runaway_s", "reset_gap_s", "settle_s")
@@ -73,16 +88,21 @@ def reset_events(output_path):
         p.unlink()
 
 
-def record_events(events, file_name, ursi, output_path):
+def event_rows(events, file_name, ursi):
+    return [f"{file_name},{ursi},{k},{ev['onset_time']},{ev['reset_time']},"
+            f"{ev['settle_time']},{ev['runaway_s']},{ev['reset_gap_s']},"
+            f"{ev['settle_s']}"
+            for k, ev in enumerate(events, start=1)]
+
+
+def record_events(rows, output_path):
     p = Path(output_path) / EVENTS_FILE
     write_header = not p.exists()
     with open(p, "a") as f:
         if write_header:
             f.write(",".join(EVENT_COLS) + "\n")
-        for k, ev in enumerate(events, start=1):
-            f.write(f"{file_name},{ursi},{k},{ev['onset_time']},{ev['reset_time']},"
-                    f"{ev['settle_time']},{ev['runaway_s']},{ev['reset_gap_s']},"
-                    f"{ev['settle_s']}\n")
+        for row in rows:
+            f.write(row + "\n")
 
 
 def detrend_fit(series, mask):
@@ -198,33 +218,48 @@ def repair_by_interpolation(df, file_path, output_path):
     return repaired_df
 
 
-def excise(df, file_path, ursi, output_path):
+def excise(df, file_path, output_path):
     """Default path: annotate crashes on the original clock, fabricate nothing."""
     annotated, events = CrashSurgery.prepare(df)
-    record_events(events, file_path.name, ursi, output_path)
     if events:
         fig = CrashSurgery.plot_excision(annotated, events)
         fig.savefig(output_path / file_path.name.replace(".csv", "_excised.png"))
         plt.close(fig)
-    return annotated
+    return annotated, events
 
 
-def too_short(df, max_samples, file_path):
-    if max_samples is not None and len(df) < max_samples:
-        print(f"skip (only {len(df)} samples, fewer than the requested "
-              f"{max_samples}): {file_path}")
-        return True
-    return False
+def too_short(df, max_samples):
+    return max_samples is not None and len(df) < max_samples
 
 
-def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
-                 max_seconds=None, max_samples=None, crash_mode="surgery"):
+def short_message(df, max_samples):
+    return f"only {len(df)} samples, fewer than the requested {max_samples}"
+
+
+def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
+                max_seconds=None, max_samples=None, crash_mode="surgery"):
+    """Process one recording; safe to run in a worker process.
+
+    Writes only this file's own outputs (the processed CSV and its plot) and
+    returns a result dict for record_result(), which owns the shared tables:
+      status       "written", "skipped" or "error"
+      message      skip reason, or the traceback on error
+      crash_count  (ursi, max crash_count) once the recording is known usable,
+                   else None -- recorded for every usable file, written or not
+      events       crash_events.csv rows; only ever non-empty when written
+    """
+    res = {"file": str(file_path), "status": "error", "message": "",
+           "crash_count": None, "events": []}
+
+    def skipped(message):
+        res.update(status="skipped", message=message, events=[])
+        return res
+
     try:
         df = pd.read_csv(file_path)
         if not REQUIRED_COLS.issubset(df.columns):
             # LSL marker files live in the same folder and have a different schema
-            print(f"skip (not an events file): {file_path}")
-            return
+            return skipped("not an events file")
         # Every file in this set ends with a duplicated flip_time. A zero dt
         # makes velocity undefined and the resulting NaN poisons detrend.
         keep = np.r_[True, np.diff(df.flip_time.values.astype(float)) > 0]
@@ -233,13 +268,10 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
             df = trim_to(df, max_seconds)
         if len(df) < MIN_SAMPLES:
             span = (df.flip_time.iloc[-1] - df.flip_time.iloc[0]) if len(df) > 1 else 0.0
-            print(f"skip (aborted recording: {len(df)} usable sample(s), "
-                  f"{span:.3f} s): {file_path}")
-            return
+            return skipped(f"aborted recording: {len(df)} usable sample(s), "
+                           f"{span:.3f} s")
         ursi = get_ursi(str(file_path))
-        crash_count = df.crash_count.max()
-        with open("crash_count.csv",'a') as f:
-            f.write(f"{ursi},{crash_count}\n")
+        res["crash_count"] = (ursi, df.crash_count.max())
 
         df.user_pos = df.user_pos * -1
         if crash_mode not in CRASH_MODES:
@@ -247,15 +279,16 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
         # Surgery adds no rows, so the --max_samples gate can run before it and
         # a skipped file leaves no event rows or plot behind. Interp gains
         # ~78 rows per crash, so its gate has to wait for the repaired length.
-        if crash_mode == "surgery" and too_short(df, max_samples, file_path):
-            return
+        if crash_mode == "surgery" and too_short(df, max_samples):
+            return skipped(short_message(df, max_samples))
+        events = []
         if crash_mode == "interp":
             df = repair_by_interpolation(df, file_path, output_path)
         else:
-            df = excise(df, file_path, ursi, output_path)
+            df, events = excise(df, file_path, output_path)
         if max_samples is not None:
-            if too_short(df, max_samples, file_path):
-                return
+            if too_short(df, max_samples):
+                return skipped(short_message(df, max_samples))
             df = truncate_to(df, max_samples)
         df["tracking"] = df.user_pos - df.stim_pos
         df["covary"] = np.abs(df.user_pos) - np.abs(df.stim_pos)
@@ -298,13 +331,43 @@ def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
         
         df.user_pos = df.user_pos * -1
         df.to_csv(output_path / filename, index=False)
+        # Event rows only for files that were written, so every row in
+        # crash_events.csv has a matching output CSV.
+        res.update(status="written", message=filename,
+                   events=event_rows(events, file_path.name, ursi))
     except Exception:
         # was a bare `except:`, which also swallowed KeyboardInterrupt and
         # logged a filename with no indication of what went wrong
-        traceback.print_exc()
-        print(f"err:{file_path}")
+        res.update(status="error", message=traceback.format_exc(), events=[])
+    return res
+
+
+def record_result(res, output_path):
+    """Write one result's share of the shared tables. Parent process only."""
+    if res["crash_count"] is not None:
+        ursi, crash_count = res["crash_count"]
+        with open("crash_count.csv", 'a') as f:
+            f.write(f"{ursi},{crash_count}\n")
+    if res["events"]:
+        record_events(res["events"], output_path)
+    if res["status"] == "written":
+        print(res["file"])
+    elif res["status"] == "skipped":
+        print(f"skip ({res['message']}): {res['file']}")
+    else:
+        print(res["message"], end="", file=sys.stderr)
+        print(f"err:{res['file']}")
         with open("errs.log", 'a') as f:
-            f.write(f"{file_path}\n{traceback.format_exc()}\n")
+            f.write(f"{res['file']}\n{res['message']}\n")
+
+
+def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
+                 max_seconds=None, max_samples=None, crash_mode="surgery"):
+    """process_one() and record_result() together: the serial, single-file path."""
+    res = process_one(file_path, output_path, detrend_vectors, zscale_vectors,
+                      max_seconds, max_samples, crash_mode)
+    record_result(res, output_path)
+    return res
 
 def main():
     args = parse_arguments()
@@ -318,6 +381,8 @@ def main():
     csv_files = sorted(base_path.glob("*.csv"))
     if not csv_files:
         raise SystemExit(f"no CSV files found in {base_path}")
+    if args.jobs < 1:
+        raise SystemExit(f"--jobs must be at least 1, got {args.jobs}")
 
     output_path.mkdir(parents=True, exist_ok=True)
     # Only a surgery run owns the event table. An interp run into the same
@@ -330,11 +395,31 @@ def main():
         print(f"trimming every recording to its first {args.max_seconds:g} s")
     if args.max_samples is not None:
         print(f"truncating every recording to its first {args.max_samples} samples")
-    for file_path in csv_files:
-        print(file_path)
-        process_file(file_path, output_path, args.detrend_vectors,
-                     args.zscale_vectors, args.max_seconds, args.max_samples,
-                     crash_mode=args.crash_mode)
+    work = partial(process_one, output_path=output_path,
+                   detrend_vectors=args.detrend_vectors,
+                   zscale_vectors=args.zscale_vectors,
+                   max_seconds=args.max_seconds, max_samples=args.max_samples,
+                   crash_mode=args.crash_mode)
+    jobs = min(args.jobs, len(csv_files))
+    print(f"{len(csv_files)} file(s), {jobs} worker(s)")
+    counts = {"written": 0, "skipped": 0, "error": 0}
+
+    def drain(results):
+        for res in results:
+            record_result(res, output_path)
+            counts[res["status"]] += 1
+
+    if jobs == 1:
+        drain(map(work, csv_files))
+    else:
+        # spawn on every platform: fork after numpy/matplotlib have started
+        # threads can deadlock, and macOS already defaults to spawn. imap keeps
+        # input order, so the shared tables come out in sorted-file order
+        # exactly as a serial run writes them.
+        with multiprocessing.get_context("spawn").Pool(jobs) as pool:
+            drain(pool.imap(work, csv_files))
+    print(f"done: {counts['written']} written, {counts['skipped']} skipped, "
+          f"{counts['error']} error(s)")
 
 if __name__ == "__main__":
     main()
