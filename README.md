@@ -30,7 +30,15 @@ to 4.0 s at 30 Hz).
 ### Dependencies
 
 Julia packages are pinned in `Project.toml` / `Manifest.toml`; the first run resolves them.
-Python needs `pandas numpy scipy matplotlib`, plus `pytest` for the tests.
+Python dependencies are declared in `requirements.txt`, and `requirements-dev.txt` adds `pytest`:
+
+```bash
+pip install -r requirements-dev.txt    # or: uv pip install -r requirements-dev.txt
+```
+
+Each package is bounded to the major version the current results were verified under (pandas 3,
+numpy 2, scipy 1, matplotlib 3). The bounds are deliberate — the numbers are the deliverable — so
+widen one only after the golden-file test passes against it.
 
 ### Tests
 
@@ -53,7 +61,7 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_sec
 julia --threads=auto compute_irt_parallel.jl ./trimmed ./trimmed_irt
 ```
 
-Trimming happens at load, before repair and before alignment, and the output filename is tagged
+Trimming happens at load, before crash handling and before alignment, and the output filename is tagged
 `_trim<N>s`. That ordering is deliberate — DTW aligns the whole series, so iRT from a full-length
 run that is then truncated differs from iRT of a run that was only ever that long.
 
@@ -213,10 +221,12 @@ When control is lost the stimulus runs to the screen boundary, the controller re
 On a ground-truth test (crash-free recordings with synthetic crashes injected) this is several
 times more accurate than interpolation, and it perturbs nothing far from a crash.
 
-The cost is coverage: excision marks a median 14% of a *crashy* recording as missing, up to 35%,
-but only 15 of the 66 continuous-phase files crash at all, and across the continuous phase the
-loss is 0.65% of recording time. Two thirds of it is controller dead time during which no samples
-were logged; the interpolation path reports that time as present by synthesising it.
+The cost is coverage, and it is small. In a *crashy* recording excision marks a median 1.1% of
+rows invalid (0.6–7.5%); counting the reset gap, a median 1.9% of recording time is missing
+(1.0–9.9%). Only 15 of the 66 continuous-phase files crash at all, so across the continuous phase
+the loss is 0.6% of recording time. About 40% of that is controller dead time during which no
+samples were logged; the interpolation path reports that time as present by synthesising it.
+(Measured 2026-10-05 on the surgery outputs.)
 
 ### The legacy path, kept for reference
 

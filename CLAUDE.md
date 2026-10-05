@@ -216,7 +216,9 @@ If working on `CrashSurgery`, note:
 
 Julia deps are pinned in `Project.toml`/`Manifest.toml` — do not add `Pkg.add()` calls to scripts.
 
-Python: pandas, numpy, scipy, matplotlib. No requirements.txt:
+Python deps are declared in `requirements.txt` (runtime) and `requirements-dev.txt` (adds pytest).
+Each is bounded to the major version the results were verified under — do not widen a bound
+without re-running the golden-file test against it:
 ```bash
-pip install pandas numpy scipy matplotlib
+pip install -r requirements-dev.txt
 ```
