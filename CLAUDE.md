@@ -16,6 +16,9 @@ and `../README.md` is empty. Do not send anyone to either.
 ```bash
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data
 
+# serial, in one process (easier to debug); default is one worker per CPU
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --jobs 1
+
 # with optional signal processing
 python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data --detrend_vectors --zscale_vectors
 
@@ -105,7 +108,13 @@ resolves packages and is slower.
   `surgery`), computes tracking/covary/velocity columns, optionally detrends and z-scores, writes
   output. Skips files lacking `REQUIRED_COLS`. Writes `crash_events.csv` and `<name>_excised.png`
   to the output folder (overwritten per run). Appends to `errs.log` (with traceback) and
-  `crash_count.csv`; those two accumulate across runs.
+  `crash_count.csv`; those two accumulate across runs. Runs files in a `spawn` process pool
+  (`--jobs`, default one per CPU; `--jobs 1` is serial and in-process). The work is split so
+  that only the parent touches shared files: `process_one` writes a file's own CSV and plot and
+  returns a result; `record_result` writes the three shared tables in sorted-file order, so
+  serial and parallel runs are byte-identical (verified on the full corpus, 24.5 s → 4.3 s on 14
+  cores). `process_file` is the two together. Do not reintroduce a shared-file write inside
+  `process_one`.
 - **`CrashSurgery.py`** — The default crash handling. `detect_events` locates onset from the plant
   identity, reset from the `crash_count` step, settle from the post-reset transient. `annotate`
   adds `crash_phase`, `is_valid`, `epoch`, `time_since_crash`, `time_to_crash` without touching

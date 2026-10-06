@@ -17,6 +17,9 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./processed_data
 julia --threads=auto compute_irt_parallel.jl ./processed_data ./irt_data
 ```
 
+Stage 1 runs files in parallel, one worker per CPU by default; `--jobs N` sets the count and
+`--jobs 1` runs serially in one process, which gives the most readable tracebacks. Output is
+identical either way.
 Add `--detrend_vectors --zscale_vectors` to stage 1 for optional signal processing.
 Add `--max_seconds N` to keep only the first N seconds of each recording — see below.
 Add `--crash_mode interp` to stage 1 to run the legacy interpolation path instead — see
@@ -169,6 +172,8 @@ least 6 NaN samples. Downstream code that assumes a fully finite `irt` column ne
 read.
 
 **`errs.log` and `crash_count.csv` append.** Clear them between runs if you want an accurate count.
+Both are written to the working directory, not the output folder. A file that errors is logged
+with its traceback and contributes no rows to `crash_events.csv`; the rest of the run carries on.
 
 **LSL marker files share the input folder.** Files with the `StimMarkers_alpha,lsl_timestamp,...`
 schema are skipped automatically by both stages. They are not corrupt — they are the sync channel
