@@ -220,8 +220,10 @@ because the 2.583 s controller-reset dead time is filled with roughly 78 fabrica
 crash. Excision is several times more accurate on the same test.
 
 Corpus numbers (66 continuous files, 15 crashy): excision marks 0.6–7.5% of a crashy file invalid;
-three files crash within 4 s of the end and leave a stub epoch shorter than the band, which stays
-NaN (`n_epochs_aligned` is then one less than crashes + 1).
+three valid runs are shorter than the band and stay NaN — one at the very start of a file, one
+between back-to-back crashes, one at the end (measured 2026-10-07). A crash very near the end
+usually leaves no valid run after it at all, so `n_epochs_aligned` counts aligned valid runs and
+need not equal crashes + 1.
 
 If working on `CrashSurgery`, note:
 
