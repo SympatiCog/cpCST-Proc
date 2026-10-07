@@ -52,7 +52,8 @@ julia --threads=auto tests/test_irt.jl
 
 `tests/synth.py` builds recordings from the plant identity with crashes injected, so the
 detection and annotation tests need no corpus. `tests/data/golden_interp.csv` pins the interp
-path's output; it must not change.
+path's output. Change it only on purpose, and only after confirming the diff is exactly the
+intended one (as with the sign-convention change, which negated three columns and nothing else).
 
 ## Comparing the full task against a LITE session
 
@@ -60,7 +61,7 @@ path's output; it must not change.
 to the LITE duration:
 
 ```bash
-python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_seconds 291.3
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_seconds 285
 julia --threads=auto compute_irt_parallel.jl ./trimmed ./trimmed_irt
 ```
 
@@ -107,30 +108,42 @@ supply 291 s of samples.
 
 ## What comes out
 
-Stage 2 writes one CSV per input with the source columns plus:
+**Stage 1** (`processed_data`) writes one CSV per recording with the source columns plus:
 
 | Column | Meaning |
 | --- | --- |
-| `irt` | Stimulus-anchored instantaneous reaction time, seconds. Positive = user lagged the stimulus. NaN where undefined (see below). |
-| `dtw_radius` | The DTW band actually used, recorded so results carry their own provenance. |
-| `n_epochs_aligned` | How many crash-free epochs were long enough to align. Constant per file. |
-| `track_corr` | Peak correlation of stimulus against flipped user position over user lags 0–2 s, valid rows only. Positive = following the stimulus. Constant per file. |
-| `track_lag` | The user lag, in seconds, at which `track_corr` peaks. |
-| `tracking_ok` | `track_corr > 0.5`. When False, iRT is not interpretable: DTW returns plausible values whether or not anyone was tracking. |
-| `sign_convention` | `raw`: every user column has the sign of the recording (see "Things that will bite you"). Absent from older outputs. |
-| `crash_count` | Cumulative crashes, stepping at each reset. |
-| `did_crash` | True on the first sample after a reset. |
 | `crash_phase` | `ok`, `runaway` (control lost, stimulus diverging) or `reacquire` (post-reset transient). |
 | `is_valid` | False from crash onset through re-acquisition. The only rows the aligner sees are the True ones. |
 | `epoch` | 0 before the first reset, +1 at each reset. |
 | `time_since_crash` | Seconds since the most recent reset; NaN before the first. |
 | `time_to_crash` | Seconds until the next reset; NaN after the last. |
+| `tracking` | `stim_pos + user_pos`: the plant's error term. The stimulus diverges while `sign(tracking) == sign(stim_pos)`. |
+| `abs_tracking` | `\|tracking\|`. |
+| `covary` | `\|user_pos\| − \|stim_pos\|`. |
+| `abs_covary` | `\|covary\|`. |
+| `user_pos_vel`, `stim_pos_vel`, `tracking_vel` | First derivatives, position units per second. NaN across the reset gap. |
+| `sign_convention` | `raw`: every user column has the sign of the recording (see "Things that will bite you"). Absent from older outputs. |
+
+The source columns pass through unchanged, among them `crash_count` (cumulative crashes, stepping
+at each reset) and `did_crash` (True on the first sample after a reset).
+
+**Stage 2** (`irt_data`) writes one CSV per stage-1 file with all of the above plus:
+
+| Column | Meaning |
+| --- | --- |
+| `irt` | Stimulus-anchored instantaneous reaction time, seconds. Positive = user lagged the stimulus. NaN where undefined (see below). |
+| `time_secs` | `flip_time` minus the file's first `flip_time`. |
+| `dtw_radius` | The DTW band actually used, recorded so results carry their own provenance. |
+| `n_epochs_aligned` | How many crash-free runs were long enough to align. Constant per file. |
+| `track_corr` | Peak correlation of stimulus against flipped user position over user lags 0–2 s, valid rows only. Positive = following the stimulus. Constant per file. |
+| `track_lag` | The user lag, in seconds, at which `track_corr` peaks. |
+| `tracking_ok` | `track_corr > 0.5`. When False, iRT is not interpretable: DTW returns plausible values whether or not anyone was tracking. No file in the current corpus is flagged. |
 
 `irt` is NaN wherever `is_valid` is False, at the first and last 3 samples of every aligned
-epoch (DTW's endpoint constraint pins the path there; the artefact is one sample wide), and
-throughout any epoch shorter than the DTW band (120 samples), where the warp would collapse onto
-the diagonal and report iRT = 0 for every sample. Three corpus files crash within 4 s of the
-end and leave such a stub.
+run (DTW's endpoint constraint pins the path there; the artefact is one sample wide), and
+throughout any valid run shorter than the DTW band (120 samples), where the warp would collapse
+onto the diagonal and report iRT = 0 for every sample. In the continuous phase that happens three
+times — once at the very start of a file, once between back-to-back crashes, once at the end.
 
 Interp-mode outputs (`--crash_mode interp`) carry `was_repaired` instead of the five annotation
 columns, and are tagged `_interp` in the filename.
@@ -246,8 +259,8 @@ samples were logged; the interpolation path reports that time as present by synt
 ### The legacy path, kept for reference
 
 `--crash_mode interp` runs `CrashRepair`: PCHIP interpolation across each crash, tanh damping,
-Savitzky-Golay smoothing, and a resample to a uniform 30 Hz grid. It is unchanged and its output
-is pinned by a golden-file test. Know what it does before using it:
+Savitzky-Golay smoothing, and a resample to a uniform 30 Hz grid. `CrashRepair` itself is
+unchanged; the interp path's output is pinned by a golden-file test. Know what it does before using it:
 
 - It fabricates ~78 samples per crash and reassigns `flip_time` inside each ±3 s repair window,
   displacing timestamps by up to 1.276 s across ~14% of a crashy recording. Its outputs do not
