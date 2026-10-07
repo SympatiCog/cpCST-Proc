@@ -45,8 +45,8 @@ trims away the post-gap resumption, and so leaves that gap unrepaired and the fi
 
 | target | result across the 66 CPT/CPTLITE files |
 | --- | --- |
-| 291.3 s | 65 files at 8739 samples, 1 at 8671 (<redacted>'s gap spans 289.02–291.60 s) |
-| 288 s | 65 files at 8640, 1 at 8638 (<redacted>'s gap spans 287.92–290.50 s) |
+| 291.3 s | 65 files at 8739 samples, 1 at 8671 (that file's gap spans 289.02–291.60 s) |
+| 288 s | 65 files at 8640, 1 at 8638 (that file's gap spans 287.92–290.50 s) |
 | **285 s** | **all 66 at exactly 8550 samples** — verified |
 
 Use **285** when equal N is wanted from a time-based cut.
@@ -77,7 +77,7 @@ computed on exactly the series that gets written — a CPT run z-scored under `-
 standardised over its retained window, not over the full 10 minutes.
 
 **8740 is the largest value every CPT/CPTLITE file can supply** (the binding file is
-`<redacted>_ses-MOBI2B_CPTLITE`). Anything larger and files start being skipped. Note that a value
+a MOBI2B CPTLITE run). Anything larger and files start being skipped. Note that a value
 this large skips almost every Calibrate run, which is correct — a ~182 s calibration cannot supply
 291 s of samples — so point `--base_path` at continuous-phase files, or expect the skips.
 
@@ -128,7 +128,10 @@ resolves packages and is slower.
   grid; indexing it by row position from the original frame silently misaligns the traces).
 - **`compute_irt_parallel.jl`** — CLI script. Banded DTW alignment of stimulus against user
   position, run separately over each contiguous `is_valid` run; emits stimulus-anchored `irt`,
-  `dtw_radius` and `n_epochs_aligned`. Per-file error isolation, so one bad file warns rather than
+  `dtw_radius`, `n_epochs_aligned`, and a tracking check (`track_corr`, `track_lag`,
+  `tracking_ok = track_corr > 0.5`, computed on the flipped user position over valid rows only).
+  No corpus file is flagged (CPT/CPTLITE minimum 0.655). Stage 2 writes `user_pos` **negated**,
+  unlike stage 1. Per-file error isolation, so one bad file warns rather than
   killing the run.
 - **`DTW.jl`** — Pluto notebook, now a thin front end that `include`s the script above. It used to
   hold a second copy of the pipeline; that duplication is how a sampling-rate error came to live
@@ -165,12 +168,17 @@ resolves packages and is slower.
 Two identities recovered from the data, verified across the retest set. Both are load-bearing.
 
 ```
-d(stim_pos)/dt = 3 * lambda_val * (stim_pos + user_pos_raw)        R^2 >= 0.9999
+d(stim_pos)/dt = 3 * lambda_val * (stim_pos + user_pos_raw)        median R^2 0.99995, min 0.898
 lsl_timestamp  = onset_lsl + flip_time                             median residual 0.7 ms
 ```
 
 The first means `|stim_pos|` grows exactly while `sign(e) == sign(stim_pos)`, which locates crash
-onset with no tuned threshold. `CrashSurgery.check_plant_fit()` re-verifies it on new data.
+onset with no tuned threshold. `CrashSurgery.check_plant_fit()` re-verifies it on new data —
+pass `user_is_flipped=False` on raw files; the default assumes `user_pos` is already negated.
+R^2 measured 2026-10-06 across 131 recordings (two aborted ones excluded): 75 reach 0.9999,
+98 reach 0.999, 5th percentile 0.986, minimum 0.898 (a Calibrate run).
+Continuous phase alone: median 0.99988, minimum 0.978. A fit in the high 0.9s is normal; one far
+below that is worth a look.
 
 The second means **`flip_time` is the join key to physiology**. Never renumber or resample it if
 the output is destined for a physiological analysis. Surgery mode honours this by construction.

@@ -56,6 +56,21 @@ const EDGE_MASK = 3
 
 const REQUIRED_COLS = ["flip_time", "stim_pos", "user_pos"]
 
+# Tracking check. DTW always finds some path inside the band, so it returns
+# plausible-looking iRT whether or not the participant was following the
+# stimulus. iRT cannot flag a recording where they were not; this can.
+#
+# `track_corr` is the peak Pearson correlation of stimulus against the FLIPPED
+# user position over user lags 0..TRACK_MAX_LAG_S, pooled over the valid runs
+# (no pair spans a crash). Following the stimulus makes it positive. Measured
+# 2026-10-06: CPT/CPTLITE median 0.82, minimum 0.655; Calibrate median 0.94,
+# minimum 0.79. No file in the corpus falls below TRACK_MIN_CORR, so the flag
+# is a guard for new data. It must stay on valid rows: the crash runaway is the
+# user moving the wrong way at ~60x normal amplitude, and 2-3% of runaway rows
+# is enough to drive a whole-recording correlation to -0.9.
+const TRACK_MAX_LAG_S = 2.0
+const TRACK_MIN_CORR = 0.5
+
 # Forward fill NaN values
 function ffill!(vec)
 	for k in 1:length(vec)
@@ -158,10 +173,44 @@ function compute_irt!(DF; radius::Int=DTW_RADIUS)
 	aligned > 0 || error("no crash-free epoch of at least $radius samples; " *
 	                     "iRT is not defined for this recording")
 
+	r, lag = tracking_corr(DF.stim_pos, DF.user_pos, DF.flip_time, valid)
 	DF[!, :irt] = irt
 	DF[!, :dtw_radius] = fill(radius, n)
 	DF[!, :n_epochs_aligned] = fill(aligned, n)
+	DF[!, :track_corr] = fill(r, n)
+	DF[!, :track_lag] = fill(lag, n)
+	DF[!, :tracking_ok] = fill(r > TRACK_MIN_CORR, n)
 	return skipped
+end
+
+"""
+    tracking_corr(stim, user, t, valid; max_lag_s) -> (r, lag_s)
+
+Peak correlation of `stim[i]` against `user[i + k]` over k = 0..max_lag, and
+the lag in seconds at which it peaks. `user` must already be flipped (as the
+loader leaves it). Pairs are drawn only from within a single valid run.
+"""
+function tracking_corr(stim, user, t, valid; max_lag_s=TRACK_MAX_LAG_S)
+	dt = median(diff(t))
+	K = round(Int, max_lag_s / dt)
+	runs = valid_runs(valid)
+	best_r, best_k = -Inf, 0
+	for k in 0:K
+		n = 0; sx = 0.0; sy = 0.0; sxx = 0.0; syy = 0.0; sxy = 0.0
+		for rng in runs, i in first(rng):last(rng)-k
+			x = stim[i]; y = user[i + k]
+			n += 1; sx += x; sy += y; sxx += x*x; syy += y*y; sxy += x*y
+		end
+		n > 2 || continue
+		vx = sxx - sx*sx/n; vy = syy - sy*sy/n
+		(vx > 0 && vy > 0) || continue
+		r = (sxy - sx*sy/n) / sqrt(vx * vy)
+		if r > best_r
+			best_r, best_k = r, k
+		end
+	end
+	isfinite(best_r) || return (NaN, NaN)
+	return (best_r, best_k * dt)
 end
 
 function align_run!(irt, stim, user, t, rng, radius)
@@ -211,6 +260,7 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 	mkpath(destination_folder)
 	failures = Threads.Atomic{Int}(0)
 	short_epochs = Threads.Atomic{Int}(0)
+	not_tracking = Threads.Atomic{Int}(0)
 
 	Threads.@threads for file in csv_files
 		# isolate per file: the folder also holds LSL marker CSVs with an
@@ -218,6 +268,10 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 		try
 			df = load_cpCST_csv(file)
 			Threads.atomic_add!(short_epochs, compute_irt!(df; radius=radius))
+			if !df.tracking_ok[1]
+				Threads.atomic_add!(not_tracking, 1)
+				@warn "not tracking the stimulus; iRT is not interpretable" file track_corr=df.track_corr[1]
+			end
 			CSV.write(joinpath(destination_folder, basename(file)), df)
 		catch err
 			Threads.atomic_add!(failures, 1)
@@ -227,7 +281,8 @@ function process_files(source_folder, destination_folder; radius::Int=DTW_RADIUS
 
 	n_ok = length(csv_files) - failures[]
 	println("processed $(n_ok)/$(length(csv_files)) files at radius $radius; " *
-	        "$(short_epochs[]) epoch(s) shorter than the band left NaN")
+	        "$(short_epochs[]) epoch(s) shorter than the band left NaN; " *
+	        "$(not_tracking[]) file(s) flagged tracking_ok = false")
 	return n_ok
 end
 

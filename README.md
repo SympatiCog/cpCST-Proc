@@ -114,6 +114,9 @@ Stage 2 writes one CSV per input with the source columns plus:
 | `irt` | Stimulus-anchored instantaneous reaction time, seconds. Positive = user lagged the stimulus. NaN where undefined (see below). |
 | `dtw_radius` | The DTW band actually used, recorded so results carry their own provenance. |
 | `n_epochs_aligned` | How many crash-free epochs were long enough to align. Constant per file. |
+| `track_corr` | Peak correlation of stimulus against flipped user position over user lags 0–2 s, valid rows only. Positive = following the stimulus. Constant per file. |
+| `track_lag` | The user lag, in seconds, at which `track_corr` peaks. |
+| `tracking_ok` | `track_corr > 0.5`. When False, iRT is not interpretable: DTW returns plausible values whether or not anyone was tracking. |
 | `crash_count` | Cumulative crashes, stepping at each reset. |
 | `did_crash` | True on the first sample after a reset. |
 | `crash_phase` | `ok`, `runaway` (control lost, stimulus diverging) or `reacquire` (post-reset transient). |
@@ -187,12 +190,14 @@ set (133 files, 515 crashes).
 The plant is deterministic — the stimulus is a pure integrator on the tracking error:
 
 ```
-d(stim_pos)/dt = 3 · lambda_val · (stim_pos + user_pos_raw)          R² ≥ 0.9999
+d(stim_pos)/dt = 3 · lambda_val · (stim_pos + user_pos_raw)          median R² 0.99995
 ```
 
 So `|stim_pos|` grows exactly while `sign(error) == sign(stim_pos)`, which locates the moment
 control was lost with no tuned threshold. `CrashSurgery.check_plant_fit()` re-verifies this on new
-data; a poor fit means something is wrong with the file.
+data (pass `user_is_flipped=False` on raw files). Across 131 recordings R² is above 0.986 in 95%
+of them and never below 0.898, so a fit in the high 0.9s is normal and one far below that means
+something is wrong with the file.
 
 The task clock maps onto the physiological clock exactly:
 
