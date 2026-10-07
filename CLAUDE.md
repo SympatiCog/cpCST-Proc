@@ -130,8 +130,7 @@ resolves packages and is slower.
   position, run separately over each contiguous `is_valid` run; emits stimulus-anchored `irt`,
   `dtw_radius`, `n_epochs_aligned`, and a tracking check (`track_corr`, `track_lag`,
   `tracking_ok = track_corr > 0.5`, computed on the flipped user position over valid rows only).
-  No corpus file is flagged (CPT/CPTLITE minimum 0.655). Stage 2 writes `user_pos` **negated**,
-  unlike stage 1. Per-file error isolation, so one bad file warns rather than
+  No corpus file is flagged (CPT/CPTLITE minimum 0.655). Per-file error isolation, so one bad file warns rather than
   killing the run.
 - **`DTW.jl`** — Pluto notebook, now a thin front end that `include`s the script above. It used to
   hold a second copy of the pipeline; that duplication is how a sampling-rate error came to live
@@ -144,10 +143,17 @@ resolves packages and is slower.
 - **Sampling rate is 30 Hz.** Median frame interval 0.03333 s in 131 of 133 files in the retest
   set. Derive it from `flip_time` rather than hard-coding; a hard-coded `1/60` in the Julia
   timestamp conversion previously halved every iRT value produced.
-- **`user_pos` sign flip**: negated on load (`* -1`) in both languages. `reproc_cpCST.py` flips it
-  back before writing. **Derived columns are not flipped back**, so in the written file
-  `user_pos_vel` is the derivative of `-user_pos` and `tracking == -user_pos - stim_pos`.
-  `stim_pos_vel` is unaffected. Pre-existing; changing it is a research decision.
+- **Sign convention: every written column is in the raw frame.** The raw recording has
+  `user_pos ≈ -stim_pos` while tracking. Both stages negate `user_pos` *internally* (crash
+  detection, DTW alignment, the tracking check all assume "user moves with the stimulus"), and
+  that flipped frame must never reach an output. Stage 1 restores the sign before computing any
+  derived column; stage 2 flips a copy and writes `user_pos` untouched. So `user_pos_vel` is
+  `d(user_pos)/dt` and `tracking == stim_pos + user_pos`, the plant's error term. Every output
+  row carries `sign_convention == "raw"`. Files without that column were written before
+  Oct 2026 and have `user_pos_vel`, `tracking` and `tracking_vel` **negated** (and stage-2
+  `user_pos` negated too); `abs_*`, `covary`, `stim_*`, `irt` and `track_*` are unaffected.
+  The `<name>_excised.png` and interp `_repaired.png` diagnostics still plot the flipped user
+  trace, labelled as such, because overlaying it on the stimulus is the point of the plot.
 - **Expected CSV columns**: `flip_time`, `stim_pos`, `user_pos`, `crash_count`, `did_crash`,
   `lambda_val`, `expected_time`. `lambda_val` is present in **all** files, not calibration-only.
 - **Every file ends with a duplicated `flip_time`.** `reproc_cpCST.py` drops it on load. A zero dt

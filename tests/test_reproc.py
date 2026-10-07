@@ -214,3 +214,28 @@ def test_jobs_must_be_positive(tmp_path, monkeypatch):
     src = _corpus(tmp_path)
     with pytest.raises(SystemExit):
         _run_main(tmp_path, monkeypatch, src, "zero", "--jobs", "0")
+
+
+def test_output_is_in_the_raw_sign_frame(tmp_path):
+    # user_pos is flipped internally for crash handling only; every written
+    # column is in the frame of the raw recording.
+    out = run(tmp_path, "surgery")
+    got = pd.read_csv(out / "synth_crash.csv")
+    raw = pd.read_csv(DATA / "synth_crash.csv").iloc[:-1]
+    assert np.array_equal(got["user_pos"].values, raw["user_pos"].values)
+    # tracking is the plant's error term, stim + user_raw
+    assert np.allclose(got["tracking"], got["stim_pos"] + got["user_pos"],
+                       rtol=0, atol=1e-15)          # CSV parsing is not bit-exact
+    dt = got["flip_time"].diff()
+    ok = (dt > 0) & (dt <= 2.0 / FS)
+    want = (got["user_pos"].diff() / dt)[ok]
+    assert np.allclose(got["user_pos_vel"][ok], want)
+    assert (got["sign_convention"] == "raw").all()
+
+
+def test_interp_output_is_in_the_raw_sign_frame(tmp_path):
+    out = run(tmp_path, "interp")
+    got = pd.read_csv(out / "synth_crash_interp.csv")
+    assert np.allclose(got["tracking"], got["stim_pos"] + got["user_pos"],
+                       rtol=0, atol=1e-15)          # CSV parsing is not bit-exact
+    assert (got["sign_convention"] == "raw").all()

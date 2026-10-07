@@ -6,7 +6,7 @@ const LAG = 5                      # user lags stimulus by 5 samples = 0.1667 s
 function frame(n; lag=LAG)
 	t = 3.5 .+ (0:n-1) ./ 30
 	stim = sin.(2π .* t ./ 7)
-	user = -circshift(stim, lag)   # raw sign; the loader flips it back
+	user = -circshift(stim, lag)   # raw sign; compute_irt! flips a copy internally
 	DataFrame(flip_time=t, stim_pos=stim, user_pos=user)
 end
 pybool(v) = [x ? "True" : "False" for x in v]   # what pandas writes
@@ -46,6 +46,12 @@ mktempdir() do dir
 	@test abs(median(filter(!isnan, p.irt)) - LAG/30) < 0.02
 
 	@test !isfile(joinpath(dst, "short.csv"))
+
+	# user_pos is flipped internally for alignment only; the output keeps the raw sign
+	for (name, f) in (("gap.csv", g), ("plain.csv", p))
+		src_df = CSV.read(joinpath(src, name), DataFrame)
+		@test f.user_pos == src_df.user_pos
+	end
 
 	# tracking check: peak corr(stim, flipped user) over user lags 0..2 s
 	for f in (g, p)
