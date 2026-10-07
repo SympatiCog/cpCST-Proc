@@ -64,7 +64,7 @@ SIGNAL_COLS = ("user_pos", "stim_pos", "tracking", "covary",
 REQUIRED_COLS = {"flip_time", "stim_pos", "user_pos", "crash_count"}
 
 # Minimum usable samples for a recording to be worth processing, at 30 Hz.
-# Aborted sessions do occur: <redacted>'s entire MOBI1A session is two such
+# Aborted sessions do occur: one participant's entire MOBI1A session is two such
 # files, of 0.000 s and 0.034 s. The corpus is cleanly bimodal -- the next
 # shortest recording is 88.4 s -- so any threshold in that gap is unambiguous.
 # One second is far below anything real and far above anything degenerate.
