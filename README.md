@@ -117,6 +117,7 @@ Stage 2 writes one CSV per input with the source columns plus:
 | `track_corr` | Peak correlation of stimulus against flipped user position over user lags 0–2 s, valid rows only. Positive = following the stimulus. Constant per file. |
 | `track_lag` | The user lag, in seconds, at which `track_corr` peaks. |
 | `tracking_ok` | `track_corr > 0.5`. When False, iRT is not interpretable: DTW returns plausible values whether or not anyone was tracking. |
+| `sign_convention` | `raw`: every user column has the sign of the recording (see "Things that will bite you"). Absent from older outputs. |
 | `crash_count` | Cumulative crashes, stepping at each reset. |
 | `did_crash` | True on the first sample after a reset. |
 | `crash_phase` | `ok`, `runaway` (control lost, stimulus diverging) or `reacquire` (post-reset transient). |
@@ -152,11 +153,15 @@ divide. With dt near 1/30 the two land within 11% of each other, which is why it
 long. Corrected `*_vel` columns are ~33x off from older ones; old and new outputs are not
 comparable.
 
-**Derived columns use the flipped sign convention.** `user_pos` is negated on load and flipped back
-before writing, but the derived columns are not. So in the output file `user_pos_vel` is the
-derivative of `-user_pos`, and `tracking == -user_pos - stim_pos`. `stim_pos_vel` is unaffected.
-This is long-standing behaviour, left alone deliberately — which convention should win is a
-research decision, not a cleanup.
+**Every output column is in the raw sign frame, and older outputs are not.** The raw recording
+has `user_pos ≈ -stim_pos` while the participant is tracking. Both stages negate `user_pos`
+internally, so the computations can treat tracking as "moving with the stimulus", but that never
+reaches the output: `user_pos` is written as recorded, `user_pos_vel` is its derivative, and
+`tracking == stim_pos + user_pos` — the plant's error term, so the stimulus diverges exactly while
+`sign(tracking) == sign(stim_pos)`. Every row carries `sign_convention == "raw"`.
+Outputs written before October 2026 lack that column and have `user_pos_vel`, `tracking` and
+`tracking_vel` with the **opposite** sign (and stage-2 files had `user_pos` negated as well).
+Absolute-value columns, `covary`, the stimulus columns, `irt` and the tracking check are unchanged.
 
 **Negative iRT means something is wrong.** The user cannot respond before the stimulus, so a
 negative value is a direct read on alignment failure. On the 66 continuous-phase files

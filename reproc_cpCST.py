@@ -63,6 +63,10 @@ SIGNAL_COLS = ("user_pos", "stim_pos", "tracking", "covary",
 
 REQUIRED_COLS = {"flip_time", "stim_pos", "user_pos", "crash_count"}
 
+# Written to every output row. Files without this column predate it and carry
+# user_pos_vel, tracking and tracking_vel with the opposite sign.
+SIGN_CONVENTION = "raw"
+
 # Minimum usable samples for a recording to be worth processing, at 30 Hz.
 # Aborted sessions do occur: one participant's entire MOBI1A session is two such
 # files, of 0.000 s and 0.034 s. The corpus is cleanly bimodal -- the next
@@ -273,6 +277,9 @@ def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
         ursi = get_ursi(str(file_path))
         res["crash_count"] = (ursi, df.crash_count.max())
 
+        # Crash handling works in the flipped frame (user_pos negated, so that
+        # tracking means moving WITH the stimulus). That frame is internal only:
+        # the sign is restored below, before any derived column is computed.
         df.user_pos = df.user_pos * -1
         if crash_mode not in CRASH_MODES:
             raise ValueError(f"unknown crash_mode {crash_mode!r}; choose from {CRASH_MODES}")
@@ -290,7 +297,16 @@ def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
             if too_short(df, max_samples):
                 return skipped(short_message(df, max_samples))
             df = truncate_to(df, max_samples)
-        df["tracking"] = df.user_pos - df.stim_pos
+        # Back to the raw sign. Every column written from here on is in the
+        # frame of the recording: user_pos_vel is d(user_pos)/dt, and tracking
+        # is stim_pos + user_pos, the error term of the plant identity, so the
+        # stimulus diverges exactly while sign(tracking) == sign(stim_pos).
+        # Columns written before Oct 2026 had user_pos_vel, tracking and
+        # tracking_vel in the flipped frame, i.e. negated; sign_convention marks
+        # the files that are not.
+        df.user_pos = df.user_pos * -1
+        df["sign_convention"] = SIGN_CONVENTION
+        df["tracking"] = df.stim_pos + df.user_pos
         df["covary"] = np.abs(df.user_pos) - np.abs(df.stim_pos)
         df["abs_tracking"] = np.abs(df.tracking)
         df["abs_covary"] = np.abs(df.covary)
@@ -328,8 +344,7 @@ def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
         if max_samples is not None:
             filename += f"_trim{max_samples}samp"
         filename += ".csv"
-        
-        df.user_pos = df.user_pos * -1
+
         df.to_csv(output_path / filename, index=False)
         # Event rows only for files that were written, so every row in
         # crash_events.csv has a matching output CSV.

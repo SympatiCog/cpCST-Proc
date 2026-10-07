@@ -109,7 +109,9 @@ function load_cpCST_csv(filepath)
 	end
 	ffill!(fr.user_pos)
 	ffill!(fr.stim_pos)
-	fr[!, :user_pos] = fr.user_pos * -1
+	# user_pos stays in the raw sign; compute_irt! flips a copy for alignment.
+	# This used to negate the column in place, so stage 2 wrote user_pos with
+	# the opposite sign to stage 1 and to the raw recording.
 	fr[!, :time_secs] = fr.flip_time .- fr.flip_time[1]
 	return fr
 end
@@ -156,6 +158,10 @@ Naming them correctly here keeps that from being "fixed" into a sign flip.
 function compute_irt!(DF; radius::Int=DTW_RADIUS)
 	n = nrow(DF)
 	valid = hasproperty(DF, :is_valid) ? as_bool(DF.is_valid) : trues(n)
+	# Flipped frame, internal only: negated so that tracking means moving WITH
+	# the stimulus, which is what both the alignment and the tracking check
+	# assume. DF.user_pos itself is written out untouched, in the raw sign.
+	user = -DF.user_pos
 	irt = fill(NaN, n)
 	aligned = 0
 	skipped = 0
@@ -167,13 +173,13 @@ function compute_irt!(DF; radius::Int=DTW_RADIUS)
 			skipped += 1
 			continue
 		end
-		align_run!(irt, DF.stim_pos, DF.user_pos, DF.flip_time, rng, radius)
+		align_run!(irt, DF.stim_pos, user, DF.flip_time, rng, radius)
 		aligned += 1
 	end
 	aligned > 0 || error("no crash-free epoch of at least $radius samples; " *
 	                     "iRT is not defined for this recording")
 
-	r, lag = tracking_corr(DF.stim_pos, DF.user_pos, DF.flip_time, valid)
+	r, lag = tracking_corr(DF.stim_pos, user, DF.flip_time, valid)
 	DF[!, :irt] = irt
 	DF[!, :dtw_radius] = fill(radius, n)
 	DF[!, :n_epochs_aligned] = fill(aligned, n)
@@ -187,8 +193,8 @@ end
     tracking_corr(stim, user, t, valid; max_lag_s) -> (r, lag_s)
 
 Peak correlation of `stim[i]` against `user[i + k]` over k = 0..max_lag, and
-the lag in seconds at which it peaks. `user` must already be flipped (as the
-loader leaves it). Pairs are drawn only from within a single valid run.
+the lag in seconds at which it peaks. `user` must already be flipped (as
+compute_irt! passes it). Pairs are drawn only from within a single valid run.
 """
 function tracking_corr(stim, user, t, valid; max_lag_s=TRACK_MAX_LAG_S)
 	dt = median(diff(t))
