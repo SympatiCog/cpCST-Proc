@@ -10,24 +10,36 @@ DATA = Path(__file__).parent / "data"
 ANNOT = ["crash_phase", "is_valid", "epoch", "time_since_crash", "time_to_crash"]
 
 
-def run(tmp_path, mode, **kw):
-    out = tmp_path / mode
+def run(tmp_path, **kw):
+    out = tmp_path / "out"
     out.mkdir()
     r.process_file(DATA / "synth_crash.csv", out, kw.pop("detrend", False),
-                   kw.pop("zscale", False), crash_mode=mode, **kw)
+                   kw.pop("zscale", False), **kw)
     return out
 
 
-def test_interp_matches_golden(tmp_path):
-    out = run(tmp_path, "interp")
-    got = pd.read_csv(out / "synth_crash_interp.csv")
-    want = pd.read_csv(DATA / "golden_interp.csv")
+def test_surgery_matches_golden(tmp_path):
+    # Pins the default path's output end to end. Change the golden file only on
+    # purpose, after confirming the diff is exactly the intended one.
+    out = run(tmp_path)
+    got = pd.read_csv(out / "synth_crash.csv")
+    want = pd.read_csv(DATA / "golden_surgery.csv")
     pd.testing.assert_frame_equal(got, want)
-    assert (out / "synth_crash_interp_repaired.png").exists()
+
+
+def test_crash_mode_flag_is_gone(tmp_path, monkeypatch):
+    # Interpolation was removed; asking for it must fail, not fall through.
+    import pytest
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["reproc_cpCST.py", "--base_path", str(DATA),
+                                     "--output_path", str(tmp_path / "o"),
+                                     "--crash_mode", "interp"])
+    with pytest.raises(SystemExit):
+        r.main()
 
 
 def test_surgery_keeps_rows_and_clock(tmp_path):
-    out = run(tmp_path, "surgery")
+    out = run(tmp_path)
     got = pd.read_csv(out / "synth_crash.csv")
     raw = pd.read_csv(DATA / "synth_crash.csv").iloc[:-1]     # dup dropped
     assert len(got) == len(raw)
@@ -35,13 +47,12 @@ def test_surgery_keeps_rows_and_clock(tmp_path):
     assert np.array_equal(got["user_pos"].values, raw["user_pos"].values)
     for c in ANNOT:
         assert c in got.columns
-    assert "was_repaired" not in got.columns
     assert got["is_valid"].dtype == bool
     assert (~got["is_valid"]).sum() > 0
 
 
 def test_surgery_velocity_nan_across_reset_gap(tmp_path):
-    out = run(tmp_path, "surgery")
+    out = run(tmp_path)
     got = pd.read_csv(out / "synth_crash.csv")
     gap = np.r_[False, np.diff(got["flip_time"].values) > 2.0 / FS]
     assert gap.sum() == 2
@@ -51,7 +62,7 @@ def test_surgery_velocity_nan_across_reset_gap(tmp_path):
 
 
 def test_surgery_zscore_fits_on_valid_only(tmp_path):
-    out = run(tmp_path, "surgery", zscale=True)
+    out = run(tmp_path, zscale=True)
     got = pd.read_csv(out / "synth_crash_zscale.csv")
     v = got["is_valid"].values
     z = got["tracking"].values
@@ -61,7 +72,7 @@ def test_surgery_zscore_fits_on_valid_only(tmp_path):
 
 
 def test_surgery_detrend_fits_on_valid_only(tmp_path):
-    out = run(tmp_path, "surgery", detrend=True)
+    out = run(tmp_path, detrend=True)
     got = pd.read_csv(out / "synth_crash_detrend.csv")
     v = got["is_valid"].values
     y = got["stim_pos"].values
@@ -71,7 +82,7 @@ def test_surgery_detrend_fits_on_valid_only(tmp_path):
 
 
 def test_surgery_writes_events_and_plot(tmp_path):
-    out = run(tmp_path, "surgery")
+    out = run(tmp_path)
     ev = pd.read_csv(out / r.EVENTS_FILE)
     assert list(ev.columns) == list(r.EVENT_COLS)
     assert len(ev) == 2 and list(ev["k"]) == [1, 2]
@@ -90,26 +101,12 @@ def test_events_file_is_fresh_per_run(tmp_path):
 
 
 def test_surgery_skip_on_max_samples_leaves_no_trace(tmp_path):
-    out = run(tmp_path, "surgery", max_samples=100000)
+    out = run(tmp_path, max_samples=100000)
     assert list(out.iterdir()) == []
 
 
-def test_interp_run_keeps_surgery_event_table(tmp_path, monkeypatch):
-    src = tmp_path / "raw"
-    src.mkdir()
-    (src / "synth_crash.csv").write_bytes((DATA / "synth_crash.csv").read_bytes())
-    out = tmp_path / "o"
-    monkeypatch.chdir(tmp_path)               # crash_count.csv lands here
-    for mode in ("surgery", "interp"):
-        monkeypatch.setattr("sys.argv", ["reproc_cpCST.py", "--base_path", str(src),
-                                         "--output_path", str(out), "--crash_mode", mode])
-        r.main()
-    assert len(pd.read_csv(out / r.EVENTS_FILE)) == 2
-    assert (out / "synth_crash.csv").exists() and (out / "synth_crash_interp.csv").exists()
-
-
 def test_surgery_max_samples_counts_invalid_rows(tmp_path):
-    out = run(tmp_path, "surgery", max_samples=1000)
+    out = run(tmp_path, max_samples=1000)
     got = pd.read_csv(out / "synth_crash_trim1000samp.csv")
     assert len(got) == 1000
     assert "is_valid" in got.columns
@@ -219,7 +216,7 @@ def test_jobs_must_be_positive(tmp_path, monkeypatch):
 def test_output_is_in_the_raw_sign_frame(tmp_path):
     # user_pos is flipped internally for crash handling only; every written
     # column is in the frame of the raw recording.
-    out = run(tmp_path, "surgery")
+    out = run(tmp_path)
     got = pd.read_csv(out / "synth_crash.csv")
     raw = pd.read_csv(DATA / "synth_crash.csv").iloc[:-1]
     assert np.array_equal(got["user_pos"].values, raw["user_pos"].values)
@@ -230,12 +227,4 @@ def test_output_is_in_the_raw_sign_frame(tmp_path):
     ok = (dt > 0) & (dt <= 2.0 / FS)
     want = (got["user_pos"].diff() / dt)[ok]
     assert np.allclose(got["user_pos_vel"][ok], want)
-    assert (got["sign_convention"] == "raw").all()
-
-
-def test_interp_output_is_in_the_raw_sign_frame(tmp_path):
-    out = run(tmp_path, "interp")
-    got = pd.read_csv(out / "synth_crash_interp.csv")
-    assert np.allclose(got["tracking"], got["stim_pos"] + got["user_pos"],
-                       rtol=0, atol=1e-15)          # CSV parsing is not bit-exact
     assert (got["sign_convention"] == "raw").all()
