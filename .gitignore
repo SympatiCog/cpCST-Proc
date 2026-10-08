@@ -12,7 +12,6 @@ errs.log
 crash_count.csv
 
 # Diagnostic plots written alongside the processed CSVs
-*_repaired.png
 *_excised.png
 
 __pycache__/

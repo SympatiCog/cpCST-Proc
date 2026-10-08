@@ -11,15 +11,10 @@ import sys
 import traceback
 import multiprocessing
 from functools import partial
-from scipy.signal import detrend
 import argparse
 from pathlib import Path
-from CrashRepair import CrashRepair
 import CrashSurgery
 import matplotlib.pyplot as plt
-
-def zscale(series):
-    return (series - series.mean()) / series.std()
 
 def get_ursi(filpath:str):
     fname = filpath.split('/')[-1]
@@ -32,12 +27,6 @@ def parse_arguments():
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--zscale_vectors", action="store_true", required=False)
     parser.add_argument("--detrend_vectors", action="store_true", required=False)
-    parser.add_argument("--crash_mode", choices=CRASH_MODES, default="surgery",
-                        help="surgery (default): locate each crash from the plant "
-                             "identity, mark onset..settle invalid on the original "
-                             "clock, never resample. interp: the legacy CrashRepair "
-                             "interpolation, kept for reference; outputs are tagged "
-                             "_interp.")
     parser.add_argument("--max_samples", type=int, default=None, required=False,
                         help="Keep only the first N samples of each processed "
                              "recording. Unlike --max_seconds this guarantees an "
@@ -73,8 +62,6 @@ SIGN_CONVENTION = "raw"
 # shortest recording is 88.4 s -- so any threshold in that gap is unambiguous.
 # One second is far below anything real and far above anything degenerate.
 MIN_SAMPLES = 30
-
-CRASH_MODES = ("surgery", "interp")
 
 # One row per detected crash, written to the output folder. Unlike errs.log
 # and crash_count.csv this is overwritten per run, not appended. All three are
@@ -137,8 +124,7 @@ def compute_velocity(df, target_col, fs=30.0):
     """First derivative, in position units per second.
 
     NaN wherever the frame interval exceeds two frames: across a controller
-    reset dt is ~2.58 s and the quotient is not a velocity of anything. On the
-    interp path the grid is uniform, so this never fires there.
+    reset dt is ~2.58 s and the quotient is not a velocity of anything.
 
     This was `diff(pos) * diff(t) * 1000` -- a multiplication where a division
     belongs. With dt close to 1/30 the two land within 11% of each other
@@ -154,19 +140,10 @@ def compute_velocity(df, target_col, fs=30.0):
     vel.iloc[0] = 0.0
     df[f"{target_col}_vel"] = vel
 
-# def resample_data(data, target_frequency=30):
-#     new_time_index = np.arange(data['flip_time'].iloc[0], data['flip_time'].iloc[-1], 1.0 / target_frequency)
-#     resampled_data = pd.DataFrame({
-#         'flip_time': new_time_index,
-#         'stim_pos': np.interp(new_time_index, data['flip_time'], data['stim_pos']),
-#         'user_pos': np.interp(new_time_index, data['flip_time'], data['user_pos'])
-#     })
-#     return resampled_data
-
 def trim_to(df, max_seconds):
     """Keep the first `max_seconds` of a recording, measured from its own start.
 
-    Applied at load, before repair and before alignment, so everything
+    Applied at load, before crash handling and alignment, so everything
     downstream sees only the retained window. That ordering matters: DTW
     aligns the series as a whole, so iRT computed on a full-length run and
     then truncated is not the same as iRT computed on a run that was only
@@ -177,53 +154,30 @@ def trim_to(df, max_seconds):
 
     `flip_time` carries a task-onset offset of 1.0-11.2 s in this corpus, so
     the window is relative to the first sample, never to absolute flip_time.
+
+    This equalizes duration, not sample count: nothing is logged during a
+    controller reset, so each crash inside the window costs ~77 rows. Use
+    --max_samples when N must be equal.
     """
     t = df["flip_time"].values.astype(float)
     return df.loc[(t - t[0]) <= max_seconds].reset_index(drop=True)
 
 
 def truncate_to(df, max_samples):
-    """Keep the first `max_samples` rows of an already-processed recording.
+    """Keep the first `max_samples` rows of an annotated recording.
 
-    Applied AFTER repair and resampling but BEFORE the derived columns and any
+    Applied AFTER crash detection but BEFORE the derived columns and any
     detrend/z-scoring, so every retained column is computed on exactly the
-    series that gets written.
+    series that gets written. The count includes rows marked invalid.
 
-    This is deliberately a different insertion point from `trim_to`. Trimming
-    raw samples cannot guarantee an output count, because repair re-inserts
-    roughly 78 samples per crash and the resample grid is rebuilt over whatever
-    span survives -- so N samples in can become more than N samples out.
-    Truncating here is immune to that by construction.
-
-    The cost is that repair may have drawn on context from just beyond the cut,
-    bounded by its +/-3 s window. If that matters more than an exact N, use
-    --max_seconds instead.
+    Crash detection sees the whole recording, so a crash whose onset falls
+    just before the cut is still annotated even if its reset falls after it.
     """
     return df.iloc[:max_samples].reset_index(drop=True)
 
 
-def repair_by_interpolation(df, file_path, output_path):
-    """Legacy path: CrashRepair interpolates across each crash and resamples.
-
-    Kept for reference and comparison. It fabricates ~78 samples per crash,
-    reassigns flip_time inside each repair window, and recovers iRT worse than
-    doing nothing on the ground-truth test; see CLAUDE.md.
-    """
-    cr = CrashRepair(df)
-    cr.set_target_max_position()  # reset value from the user's own distribution
-    repaired_df = cr.repair_tracking()
-    if df.crash_count.max() > 0:
-        fig = cr.plot_repair(repaired_df, segment_index=0)
-        if fig is not None:
-            fig.savefig(output_path / file_path.name.replace(".csv", "_interp_repaired.png"))
-            plt.close()
-        else:
-            print("No crash report generated")
-    return repaired_df
-
-
 def excise(df, file_path, output_path):
-    """Default path: annotate crashes on the original clock, fabricate nothing."""
+    """Annotate crashes on the original clock; add, remove or retime nothing."""
     annotated, events = CrashSurgery.prepare(df)
     if events:
         fig = CrashSurgery.plot_excision(annotated, events)
@@ -241,7 +195,7 @@ def short_message(df, max_samples):
 
 
 def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
-                max_seconds=None, max_samples=None, crash_mode="surgery"):
+                max_seconds=None, max_samples=None):
     """Process one recording; safe to run in a worker process.
 
     Writes only this file's own outputs (the processed CSV and its plot) and
@@ -281,21 +235,12 @@ def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
         # tracking means moving WITH the stimulus). That frame is internal only:
         # the sign is restored below, before any derived column is computed.
         df.user_pos = df.user_pos * -1
-        if crash_mode not in CRASH_MODES:
-            raise ValueError(f"unknown crash_mode {crash_mode!r}; choose from {CRASH_MODES}")
-        # Surgery adds no rows, so the --max_samples gate can run before it and
-        # a skipped file leaves no event rows or plot behind. Interp gains
-        # ~78 rows per crash, so its gate has to wait for the repaired length.
-        if crash_mode == "surgery" and too_short(df, max_samples):
+        # Excision adds no rows, so the --max_samples gate runs before it and a
+        # skipped file leaves no event rows or plot behind.
+        if too_short(df, max_samples):
             return skipped(short_message(df, max_samples))
-        events = []
-        if crash_mode == "interp":
-            df = repair_by_interpolation(df, file_path, output_path)
-        else:
-            df, events = excise(df, file_path, output_path)
+        df, events = excise(df, file_path, output_path)
         if max_samples is not None:
-            if too_short(df, max_samples):
-                return skipped(short_message(df, max_samples))
             df = truncate_to(df, max_samples)
         # Back to the raw sign. Every column written from here on is in the
         # frame of the recording: user_pos_vel is d(user_pos)/dt, and tracking
@@ -314,27 +259,19 @@ def process_one(file_path, output_path, detrend_vectors, zscale_vectors,
         for col in ["user_pos", "stim_pos", "tracking"]:
             compute_velocity(df, col)
 
-        # Surgery leaves the excised rows in place, so fit any scaling on the
-        # valid rows only. Interp has no such rows and keeps its whole-series fit.
-        valid = (df["is_valid"].values if "is_valid" in df.columns
-                 else np.ones(len(df), bool))
-        signal_cols = [c for c in SIGNAL_COLS if c in df.columns]
+        # The excised rows stay in the frame (the clock must survive), so any
+        # scaling is fitted on the valid rows only and applied to every row.
+        valid = df["is_valid"].values
         if detrend_vectors:
-            for col in signal_cols:
-                df[col] = (detrend(df[col]) if crash_mode == "interp"
-                           else detrend_fit(df[col], valid))
+            for col in SIGNAL_COLS:
+                df[col] = detrend_fit(df[col], valid)
 
         if zscale_vectors:
-            for col in signal_cols:
-                df[col] = (zscale(df[col]) if crash_mode == "interp"
-                           else zscale_fit(df[col], valid))
+            for col in SIGNAL_COLS:
+                df[col] = zscale_fit(df[col], valid)
 
-        # df = resample_data(df)
-        
         # Annotate filename with tags
         filename = file_path.name.replace(".csv", "")
-        if crash_mode == "interp":
-            filename += "_interp"
         if detrend_vectors:
             filename += "_detrend"
         if zscale_vectors:
@@ -377,10 +314,10 @@ def record_result(res, output_path):
 
 
 def process_file(file_path, output_path, detrend_vectors, zscale_vectors,
-                 max_seconds=None, max_samples=None, crash_mode="surgery"):
+                 max_seconds=None, max_samples=None):
     """process_one() and record_result() together: the serial, single-file path."""
     res = process_one(file_path, output_path, detrend_vectors, zscale_vectors,
-                      max_seconds, max_samples, crash_mode)
+                      max_seconds, max_samples)
     record_result(res, output_path)
     return res
 
@@ -400,12 +337,8 @@ def main():
         raise SystemExit(f"--jobs must be at least 1, got {args.jobs}")
 
     output_path.mkdir(parents=True, exist_ok=True)
-    # Only a surgery run owns the event table. An interp run into the same
-    # folder must leave an earlier surgery run's table alone.
-    if args.crash_mode == "surgery":
-        reset_events(output_path)
+    reset_events(output_path)
 
-    print(f"crash handling: {args.crash_mode}")
     if args.max_seconds is not None:
         print(f"trimming every recording to its first {args.max_seconds:g} s")
     if args.max_samples is not None:
@@ -413,8 +346,7 @@ def main():
     work = partial(process_one, output_path=output_path,
                    detrend_vectors=args.detrend_vectors,
                    zscale_vectors=args.zscale_vectors,
-                   max_seconds=args.max_seconds, max_samples=args.max_samples,
-                   crash_mode=args.crash_mode)
+                   max_seconds=args.max_seconds, max_samples=args.max_samples)
     jobs = min(args.jobs, len(csv_files))
     print(f"{len(csv_files)} file(s), {jobs} worker(s)")
     counts = {"written": 0, "skipped": 0, "error": 0}

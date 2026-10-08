@@ -22,8 +22,6 @@ Stage 1 runs files in parallel, one worker per CPU by default; `--jobs N` sets t
 identical either way.
 Add `--detrend_vectors --zscale_vectors` to stage 1 for optional signal processing.
 Add `--max_seconds N` to keep only the first N seconds of each recording — see below.
-Add `--crash_mode interp` to stage 1 to run the legacy interpolation path instead — see
-"Crash handling".
 Add `--radius N` to stage 2 to override the DTW band (default 120 samples, which bounds the warp
 to 4.0 s at 30 Hz).
 
@@ -40,7 +38,7 @@ pip install -r requirements-dev.txt    # or: uv pip install -r requirements-dev.
 ```
 
 Each package is bounded to the major version the current results were verified under (pandas 3,
-numpy 2, scipy 1, matplotlib 3). The bounds are deliberate — the numbers are the deliverable — so
+numpy 2, matplotlib 3). The bounds are deliberate — the numbers are the deliverable — so
 widen one only after the golden-file test passes against it.
 
 ### Tests
@@ -51,9 +49,9 @@ julia --threads=auto tests/test_irt.jl
 ```
 
 `tests/synth.py` builds recordings from the plant identity with crashes injected, so the
-detection and annotation tests need no corpus. `tests/data/golden_interp.csv` pins the interp
-path's output. Change it only on purpose, and only after confirming the diff is exactly the
-intended one (as with the sign-convention change, which negated three columns and nothing else).
+detection and annotation tests need no corpus. `tests/data/golden_surgery.csv` pins stage 1's
+output end to end. Change it only on purpose, and only after confirming the diff is exactly the
+intended one.
 
 ## Comparing the full task against a LITE session
 
@@ -65,46 +63,33 @@ python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_sec
 julia --threads=auto compute_irt_parallel.jl ./trimmed ./trimmed_irt
 ```
 
-Trimming happens at load, before crash handling and before alignment, and the output filename is tagged
-`_trim<N>s`. That ordering is deliberate — DTW aligns the whole series, so iRT from a full-length
-run that is then truncated differs from iRT of a run that was only ever that long.
+Trimming happens at load, before crash handling and before alignment, and the output filename is
+tagged `_trim<N>s`. That ordering is deliberate — DTW aligns the whole series, so iRT from a
+full-length run that is then truncated differs from iRT of a run that was only ever that long.
+The shortest `CPTLITE` raw recording is 291.32 s, which caps any target; 285 leaves a margin.
 
-**Use 285.** The shortest `CPTLITE` raw recording is 291.32 s, so that caps any target — but
-291.3 is not the right choice. `--max_seconds` equalizes *duration*, not sample count, and a cut
-landing inside a crash gap keeps the pre-gap data while trimming away the post-gap resumption,
-leaving that gap unrepaired and the file short. Three `CPTLITE` runs have a crash gap in their
-final 30 s:
+`--max_seconds` equalizes **duration**, which is what ICC wants. It does **not** equalize sample
+count: nothing is logged during a controller reset, so each crash inside the window costs ~77 rows.
+Across the 66 CPT/CPTLITE files at 285 s, 58 have 8550 or 8551 rows and the 8 with a crash in the
+window have 8320–8474. No duration gives equal N.
 
-| target | result across the 66 CPT/CPTLITE files |
-| --- | --- |
-| 291.3 s | 65 files at 8739 samples, 1 at 8671 |
-| 288 s | 65 files at 8640, 1 at 8638 |
-| **285 s** | **all 66 at exactly 8550** |
-
-Equal duration is what ICC wants. If you need an exact **sample count** instead — which is what
-sample entropy needs, since SampEn is N-biased and unequal N between sessions becomes a systematic
-difference between the things being compared — use `--max_samples`:
+If you need an exact **sample count** instead — which is what sample entropy needs, since SampEn is
+N-biased and unequal N between sessions becomes a systematic difference between the things being
+compared — use `--max_samples`:
 
 ```bash
-python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_samples 8740
+python3 reproc_cpCST.py --base_path ./raw_data --output_path ./trimmed --max_samples 8665
 ```
 
 | | applied | guarantees |
 | --- | --- | --- |
-| `--max_seconds` | on raw samples, before crash handling | equal **duration** |
-| `--max_samples` | after crash handling, before the derived columns | equal **N** |
+| `--max_seconds` | on raw samples, before crash detection | equal **duration** |
+| `--max_samples` | after crash detection, before the derived columns | equal **N** |
 
-In surgery mode the two coincide more closely than they used to, because nothing is resampled:
 `--max_samples` keeps the first N rows on the original clock, and that count **includes** rows
-marked invalid. In interp mode the different insertion point is the point: trimming raw samples
-cannot guarantee an output count, because repair re-inserts ~78 samples per crash and the resample
-grid is rebuilt over whatever span survives. Truncating after the resample is immune to that:
-`--max_samples 8740` puts all 66 CPT/CPTLITE files on exactly 8740 rows, including the 9 with
-crashes.
-
-**8740 is the largest value every CPT/CPTLITE file can supply.** Larger values start skipping files,
-and a value this large skips nearly every Calibrate run — correct, since a ~182 s calibration cannot
-supply 291 s of samples.
+marked invalid. **8665 is the largest value every CPT/CPTLITE file can supply.** Larger values start
+skipping files, and a value this large skips nearly every Calibrate run — correct, since a ~182 s
+calibration cannot supply 289 s of samples.
 
 ## What comes out
 
@@ -145,13 +130,9 @@ throughout any valid run shorter than the DTW band (120 samples), where the warp
 onto the diagonal and report iRT = 0 for every sample. In the continuous phase that happens three
 times — once at the very start of a file, once between back-to-back crashes, once at the end.
 
-Interp-mode outputs (`--crash_mode interp`) carry `was_repaired` instead of the five annotation
-columns, and are tagged `_interp` in the filename.
-
 Stage 1 also writes `crash_events.csv` to the output folder — one row per detected crash with
 onset, reset and settle times and durations — and a `<name>_excised.png` diagnostic for every
-crashy file. A surgery run starts a fresh table; an interp run into the same folder leaves it
-alone. A file skipped by `--max_samples` contributes no rows and no plot, so every row in the
+crashy file. Each run starts a fresh table. A file skipped by `--max_samples` contributes no rows and no plot, so every row in the
 table has a matching output CSV.
 
 ## Things that will bite you
@@ -177,18 +158,12 @@ Outputs written before October 2026 lack that column and have `user_pos_vel`, `t
 Absolute-value columns, `covary`, the stimulus columns, `irt` and the tracking check are unchanged.
 
 **Negative iRT means something is wrong.** The user cannot respond before the stimulus, so a
-negative value is a direct read on alignment failure. On the 66 continuous-phase files
-(15 crashy), measured 2026-09-06:
+negative value is a direct read on alignment failure. On the 66 continuous-phase files (15 crashy),
+measured 2026-09-06, excision produced none; the removed interpolation path produced 2192 negative
+samples across 11 files, every one within 5 s of a repaired crash. Any negative iRT is worth
+investigating rather than filtering.
 
-| | surgery | interp |
-| --- | --- | --- |
-| files with negative iRT | 0 | 11 |
-| negative iRT samples | 0 | 2192 |
-
-Every interp-mode negative falls within 5 s of a repaired crash. Under surgery mode any negative
-iRT is worth investigating rather than filtering.
-
-**The first and last 3 iRT samples of every epoch are NaN**, in both modes, so every file has at
+**The first and last 3 iRT samples of every epoch are NaN**, so every file has at
 least 6 NaN samples. Downstream code that assumes a fully finite `irt` column needs a NaN-aware
 read.
 
@@ -224,14 +199,14 @@ lsl_timestamp = onset_lsl + flip_time      median residual 0.7 ms, max 3.1 ms (n
 ```
 
 **`flip_time` is therefore the join key to physiology, and must not be renumbered or resampled.**
-Note that `CrashRepair` currently violates this: it reassigns `flip_time` inside each repair
-window, displacing timestamps by up to 1.276 s across roughly 14% of a crashy recording. If you are
-aligning behaviour to heart rate or EEG, that matters.
+Excision never touches it. The removed interpolation path did, displacing timestamps by up to
+1.276 s across roughly 14% of a crashy recording — so outputs from before October 2026 tagged
+`_interp` do not join cleanly to heart rate or EEG.
 
 ## Crash handling
 
 When control is lost the stimulus runs to the screen boundary, the controller resets, and about
-2.58 s pass with nothing logged. The default path, **surgery**, treats that as what it is: a gap.
+2.58 s pass with nothing logged. The pipeline treats that as what it is: a gap.
 
 - **Onset** is located from the plant identity — the first sample of the terminal divergence
   where `|stim_pos|` has passed 5% of the boundary. No tuned threshold.
@@ -253,18 +228,19 @@ The cost is coverage, and it is small. In a *crashy* recording excision marks a 
 rows invalid (0.6–7.5%); counting the reset gap, a median 1.9% of recording time is missing
 (1.0–9.9%). Only 15 of the 66 continuous-phase files crash at all, so across the continuous phase
 the loss is 0.6% of recording time. About 40% of that is controller dead time during which no
-samples were logged; the interpolation path reports that time as present by synthesising it.
+samples were logged.
 (Measured 2026-10-05 on the surgery outputs.)
 
-### The legacy path, kept for reference
+### Why there is no interpolation
 
-`--crash_mode interp` runs `CrashRepair`: PCHIP interpolation across each crash, tanh damping,
-Savitzky-Golay smoothing, and a resample to a uniform 30 Hz grid. `CrashRepair` itself is
-unchanged; the interp path's output is pinned by a golden-file test. Know what it does before using it:
+Until October 2026, `--crash_mode interp` ran `CrashRepair`: PCHIP interpolation across each crash,
+tanh damping, Savitzky-Golay smoothing, and a resample to a uniform 30 Hz grid. It was removed:
 
-- It fabricates ~78 samples per crash and reassigns `flip_time` inside each ±3 s repair window,
-  displacing timestamps by up to 1.276 s across ~14% of a crashy recording. Its outputs do not
-  join cleanly to physiology.
-- On the ground-truth test it recovers iRT **worse than doing nothing**, because `smooth_dampen`
+- It fabricated ~78 samples per crash and reassigned `flip_time` inside each ±3 s repair window,
+  so its outputs do not join cleanly to physiology.
+- On the ground-truth test it recovered iRT **worse than doing nothing**, because `smooth_dampen`
   is not identity-preserving near zero and compresses the whole window.
-- Its outputs are tagged `_interp` so a folder can never hold an ambiguous mix.
+- It produced negative iRT, and without a validity mask the tracking check misfired on its output.
+
+It remains in git history. Older outputs it wrote are tagged `_interp` and carry `was_repaired`
+instead of the crash annotation columns.
