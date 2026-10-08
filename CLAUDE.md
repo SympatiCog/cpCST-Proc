@@ -114,7 +114,7 @@ resolves packages and is slower.
   adds `crash_phase`, `is_valid`, `epoch`, `time_since_crash`, `time_to_crash` without touching
   a row or a timestamp. `plot_excision` draws the diagnostic. The LSL hand-off and binning helpers
   (`onset_lsl_time`, `crash_markers`, `add_lsl_time`, `bin_to`, `entropy_segments`) are library
-  functions, not wired in.
+  functions, not wired in, untested, and documented as experimental in the README and the v1.0.0 release; that work happens on the `physio-sync` branch.
 - **`compute_irt_parallel.jl`** — CLI script. Banded DTW alignment of stimulus against user
   position, run separately over each contiguous `is_valid` run; emits stimulus-anchored `irt`,
   `dtw_radius`, `n_epochs_aligned`, and a tracking check (`track_corr`, `track_lag`,

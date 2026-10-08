@@ -203,6 +203,11 @@ Excision never touches it. The removed interpolation path did, displacing timest
 1.276 s across roughly 14% of a crashy recording — so outputs from before October 2026 tagged
 `_interp` do not join cleanly to heart rate or EEG.
 
+**The physiological sync is not part of the supported pipeline yet.** `CrashSurgery` contains
+helpers for it (`onset_lsl_time`, `crash_markers`, `add_lsl_time`, `bin_to`, `entropy_segments`),
+but no stage calls them and they are not covered by the tests. Treat them as experimental: their
+names, arguments and output may change before they are wired in.
+
 ## Crash handling
 
 When control is lost the stimulus runs to the screen boundary, the controller resets, and about
