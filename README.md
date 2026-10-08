@@ -137,6 +137,14 @@ table has a matching output CSV.
 
 ## Things that will bite you
 
+**iRT is only meaningful for the continuous phase (CPT and CPT LITE), not for calibration
+trials.** In calibration trials crashing is part of the procedure — every full calibration has
+exactly 10 crashes and every LITE calibration exactly 5 — so about 17% of the recording is excised
+and what remains is a set of short runs. The pipeline processes every events file it is given,
+calibration trials included, and will write an `irt` column for them. Leave them out of any iRT or
+crash statistic: pooled with the continuous phase, roughly half of any crash-related figure is
+calibration artefact, and calibration trials account for 92% of all negative iRT in the corpus.
+
 **The data are 30 Hz, not 60.** Until August 2026 the Julia stage converted frame indices to
 seconds at `1/60`, so **every iRT value it had ever produced was exactly half its true value**.
 Anything computed from pre-fix outputs needs recomputing, not rescaling by eye — and the sanity
@@ -202,6 +210,11 @@ lsl_timestamp = onset_lsl + flip_time      median residual 0.7 ms, max 3.1 ms (n
 Excision never touches it. The removed interpolation path did, displacing timestamps by up to
 1.276 s across roughly 14% of a crashy recording — so outputs from before October 2026 tagged
 `_interp` do not join cleanly to heart rate or EEG.
+
+**The physiological sync is not part of the supported pipeline yet.** `CrashSurgery` contains
+helpers for it (`onset_lsl_time`, `crash_markers`, `add_lsl_time`, `bin_to`, `entropy_segments`),
+but no stage calls them and they are not covered by the tests. Treat them as experimental: their
+names, arguments and output may change before they are wired in.
 
 ## Crash handling
 
